@@ -92,12 +92,43 @@ def parse_conn_item(item):
     meta = item[:idx]
     url = item[idx:]
     conn_meta = {}
-    for part in [p for p in meta.split('@') if p]:
-        if '=' in part:
-            k, v = part.split('=', 1)
-            conn_meta[k.lower()] = v
-        else:
-            conn_meta['prefix'] = part
+    parts = [p for p in meta.split('@') if p]
+    # Se existir ao menos um par key=value, use parsing por chave
+    if any('=' in p for p in parts):
+        for part in parts:
+            if '=' in part:
+                k, v = part.split('=', 1)
+                conn_meta[k.lower()] = v
+            else:
+                # if plain token found, treat as prefix if prefix not set
+                if 'prefix' not in conn_meta:
+                    conn_meta['prefix'] = part
+    else:
+        # Suporte ao formato posicional solicitado:
+        # prefix@bucket@endpoint@forcepatch@access@secret@postgres://...
+        # forcepatch (opcional) é 'true' ou 'false' e, se presente, vem logo após o endpoint
+        if len(parts) >= 1:
+            conn_meta['prefix'] = parts[0]
+        if len(parts) >= 2:
+            # remover possível sintaxe bucket(name) -> extrair conteúdo antes de '(' se existir
+            b = parts[1]
+            if '(' in b:
+                b = b.split('(', 1)[0]
+            conn_meta['bucket'] = b
+        if len(parts) >= 3:
+            conn_meta['endpoint'] = parts[2]
+        # Verifica se há um campo force_path_style posicional (true/false) na posição 3
+        idx = 3
+        if len(parts) > idx and str(parts[idx]).lower() in ('true', 'false', '1', '0', 'yes', 'no'):
+            conn_meta['force_path_style'] = parts[idx]
+            idx += 1
+        # O próximo(s) campos são access e secret (se existirem)
+        if len(parts) > idx:
+            conn_meta['access'] = parts[idx]
+            idx += 1
+        if len(parts) > idx:
+            conn_meta['secret'] = parts[idx]
+
     return url, conn_meta
 
 
@@ -155,6 +186,9 @@ if __name__ == '__main__':
         retention_global = os.environ.get('RETENTION_DAYS')
         retention = int(meta.get('retention')) if meta.get('retention') else (int(retention_global) if retention_global else None)
         for db in dbs:
+            # adiciona timestamp para permitir ordenação e retenção
+            ts = __import__('datetime').datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+            filename = f"{db}-{ts}.dump"
             with tempfile.NamedTemporaryFile(prefix=f'{db}-', suffix='.dump', delete=False) as tmpf:
                 tmp_path = tmpf.name
             print(f'Fazendo dump de {db} para {tmp_path}...')
@@ -166,11 +200,39 @@ if __name__ == '__main__':
                 raise RuntimeError('Nenhum bucket configurado para upload (db, conn ou global)')
 
             key_prefix = prefix.rstrip('/') if prefix else ''
-            key = f"{key_prefix}/{host}-{db}.dump" if key_prefix else f"{host}-{db}.dump"
+            key = f"{key_prefix}/{host}-{filename}" if key_prefix else f"{host}-{filename}"
             print(f'Enviando para s3://{bucket}/{key}...')
             upload_file(s3, bucket, key, tmp_path)
             os.remove(tmp_path)
             print('Feito')
-        # nota: retenção será aplicada por mecanismo separado (ex: lifecycle no S3) ou pode ser implementada aqui
+        # aplicar retenção: remover objetos mais antigos que retention dias (se configurado)
         if retention:
-            print(f'Retention para conexão {conn_url} configurada: {retention} dias (observe que remoção automática não está implementada no cliente)')
+            try:
+                print(f'Aplicando retenção de {retention} dias para bucket(s) desta conexão...')
+                # listar objetos no bucket com prefix host-
+                cutoff = __import__('datetime').datetime.utcnow() - __import__('datetime').timedelta(days=retention)
+                # formata para comparar com timestamp no nome (YYYYmmddT%H%M%SZ)
+                cutoff_str = cutoff.strftime('%Y%m%dT%H%M%SZ')
+
+                # definir uma função para listar e deletar objetos que tenham o padrão host-<db>-YYYYmmddT... .dump
+                s3_resource = boto3.resource('s3', aws_access_key_id=conn_s3.get('access'), aws_secret_access_key=conn_s3.get('secret'), region_name=conn_s3.get('region'), endpoint_url=conn_s3.get('endpoint'))
+                bucket_name = conn_bucket
+                if bucket_name:
+                    bucket_obj = s3_resource.Bucket(bucket_name)
+                    for obj in bucket_obj.objects.all():
+                        key = obj.key
+                        # extrair timestamp do nome se corresponder ao padrão
+                        # procura por segmento que contenha 'T' e termine com Z antes de .dump
+                        if key.endswith('.dump'):
+                            parts = key.rsplit('-', 1)
+                            if len(parts) == 2:
+                                ts_part = parts[1].replace('.dump', '')
+                                try:
+                                    obj_ts = __import__('datetime').datetime.strptime(ts_part, '%Y%m%dT%H%M%SZ')
+                                except Exception:
+                                    continue
+                                if obj_ts < cutoff:
+                                    print(f'Apagando objeto antigo s3://{bucket_name}/{key} (ts={ts_part})')
+                                    s3.delete_object(Bucket=bucket_name, Key=key)
+            except Exception as e:
+                print('Falha ao aplicar retenção:', e)
