@@ -7,6 +7,10 @@ from botocore.config import Config
 from urllib.parse import urlparse
 import sys
 import re
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 
 
 def parse_postgres_url(pg_url):
@@ -213,9 +217,18 @@ if __name__ == '__main__':
         retention = int(meta.get('retention')) if meta.get('retention') else (int(retention_global) if retention_global else None)
         # definir base_dir (dentro do prefix haverá pastas por db). Se prefix vazio, usa host como base
         base_dir = prefix.rstrip('/') if prefix else host
+        # timezone da aplicação
+        tz_name = os.environ.get('TIMEZONE', 'America/Sao_Paulo')
+        if ZoneInfo:
+            try:
+                tz = ZoneInfo(tz_name)
+            except Exception:
+                tz = __import__('datetime').timezone.utc
+        else:
+            tz = __import__('datetime').timezone.utc
         for db in dbs:
-            # timestamp components (timezone-aware UTC)
-            now = __import__('datetime').datetime.now(__import__('datetime').timezone.utc)
+            # timestamp components (app timezone)
+            now = __import__('datetime').datetime.now(tz)
             hour = now.hour
             minute = now.minute
             day = now.day
@@ -248,8 +261,8 @@ if __name__ == '__main__':
         if retention:
             try:
                 print(f'Aplicando retenção de {retention} dias para bucket(s) desta conexão...')
-                # listar objetos no bucket com prefix host-
-                now = __import__('datetime').datetime.now(__import__('datetime').timezone.utc)
+                # listar objetos no bucket com prefix host- usando mesma timezone
+                now = __import__('datetime').datetime.now(tz)
                 cutoff = now - __import__('datetime').timedelta(days=retention)
 
                 # usar o recurso para filtrar por prefix base_dir/db/
@@ -278,7 +291,7 @@ if __name__ == '__main__':
                                 d = int(digits(day_s))
                                 mo = int(digits(month_s))
                                 y = int(digits(year_s))
-                                obj_ts = __import__('datetime').datetime(y, mo, d, h, m, tzinfo=__import__('datetime').timezone.utc)
+                                obj_ts = __import__('datetime').datetime(y, mo, d, h, m, tzinfo=tz)
                             except Exception:
                                 continue
                             if obj_ts < cutoff:
