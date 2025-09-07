@@ -1,5 +1,3 @@
-def s3_client_from_env():
-def upload_file(s3, bucket, key, path):
 #!/usr/bin/env python3
 import os
 import subprocess
