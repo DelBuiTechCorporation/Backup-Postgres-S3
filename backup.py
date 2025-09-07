@@ -6,6 +6,7 @@ import boto3
 from botocore.config import Config
 from urllib.parse import urlparse
 import sys
+import re
 
 
 def parse_postgres_url(pg_url):
@@ -26,10 +27,21 @@ def list_databases(user, password, host, port):
         "SELECT datname FROM pg_database WHERE datistemplate = false;"
     ]
     proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    # filtrar linhas de noise do Postgres (ex.: TestJobs() database.c:...)
+    def filter_noise(text):
+        if not text:
+            return ''
+        noise_re = re.compile(r"TestJobs\(\)|database\.c:\d+")
+        lines = [l for l in text.splitlines() if not noise_re.search(l)]
+        return "\n".join(lines)
+
     if proc.returncode != 0:
-        print(proc.stderr, file=sys.stderr)
+        filtered_err = filter_noise(proc.stderr)
+        if filtered_err:
+            print(filtered_err, file=sys.stderr)
         raise RuntimeError('Falha ao listar bancos')
-    dbs = [l.strip() for l in proc.stdout.splitlines() if l.strip()]
+    out = filter_noise(proc.stdout)
+    dbs = [l.strip() for l in out.splitlines() if l.strip()]
     return dbs
 
 
@@ -41,8 +53,18 @@ def dump_database(user, password, host, port, dbname, out_path):
         'pg_dump', '-h', host, '-p', str(port), '-U', user, '-F', 'c', '-f', out_path, dbname
     ]
     proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    # filtrar noise
+    def filter_noise_local(text):
+        if not text:
+            return ''
+        noise_re = re.compile(r"TestJobs\(\)|database\.c:\d+")
+        lines = [l for l in text.splitlines() if not noise_re.search(l)]
+        return "\n".join(lines)
+
     if proc.returncode != 0:
-        print(proc.stderr, file=sys.stderr)
+        filtered_err = filter_noise_local(proc.stderr)
+        if filtered_err:
+            print(filtered_err, file=sys.stderr)
         raise RuntimeError(f'Falha no pg_dump de {dbname}')
 
 
@@ -192,14 +214,18 @@ if __name__ == '__main__':
         # definir base_dir (dentro do prefix haverá pastas por db). Se prefix vazio, usa host como base
         base_dir = prefix.rstrip('/') if prefix else host
         for db in dbs:
-            # timestamp format: HH-MM-DD-MM-YYYY (hora-minuto-dia-mes-ano) - timezone-aware UTC
+            # timestamp components (timezone-aware UTC)
             now = __import__('datetime').datetime.now(__import__('datetime').timezone.utc)
-            ts = now.strftime('%H-%M-%d-%m-%Y')
-            # nome do arquivo solicitado: (Prefix)-(Nome do Banco)-HH-MM-DD-Mes-Ano
+            hour = now.hour
+            minute = now.minute
+            day = now.day
+            month = now.month
+            year = now.year
+            # nome do arquivo solicitado: prefix-db-14h-01m-07d-09mês-2025y.dump
             if prefix:
-                filename = f"{prefix}-{db}-{ts}.dump"
+                filename = f"{prefix}-{db}-{hour:02d}h-{minute:02d}m-{day:02d}d-{month:02d}mês-{year}y.dump"
             else:
-                filename = f"{db}-{ts}.dump"
+                filename = f"{db}-{hour:02d}h-{minute:02d}m-{day:02d}d-{month:02d}mês-{year}y.dump"
 
             # dump temporário local
             with tempfile.NamedTemporaryFile(prefix=f'{db}-', suffix='.dump', delete=False) as tmpf:
@@ -238,18 +264,25 @@ if __name__ == '__main__':
                             key = obj.key
                             if not key.endswith('.dump'):
                                 continue
-                            # extrair timestamp do nome: filename tem estrutura prefix-db-HH-MM-DD-MM-YYYY.dump
-                            # split dos últimos 5 campos (HH,MM,DD,MM,YYYY)
+                            # extrair timestamp do nome: filename tem estrutura ...-HHh-MMm-DDd-Mmês-YYYYy.dump
                             try:
                                 parts = key.rsplit('-', 5)
                                 if len(parts) < 5:
                                     continue
-                                ts_part = '-'.join(parts[-5:]).replace('.dump', '')
-                                obj_ts = __import__('datetime').datetime.strptime(ts_part, '%H-%M-%d-%m-%Y').replace(tzinfo=__import__('datetime').timezone.utc)
+                                # últimos 5 segmentos devem conter hour, minute, day, month, year with suffixes
+                                hour_s, minute_s, day_s, month_s, year_s = parts[-5:]
+                                def digits(s):
+                                    return ''.join(ch for ch in s if ch.isdigit())
+                                h = int(digits(hour_s))
+                                m = int(digits(minute_s))
+                                d = int(digits(day_s))
+                                mo = int(digits(month_s))
+                                y = int(digits(year_s))
+                                obj_ts = __import__('datetime').datetime(y, mo, d, h, m, tzinfo=__import__('datetime').timezone.utc)
                             except Exception:
                                 continue
                             if obj_ts < cutoff:
-                                print(f'Apagando objeto antigo s3://{bucket_name}/{key} (ts={ts_part})')
+                                print(f'Apagando objeto antigo s3://{bucket_name}/{key} (ts={h:02d}-{m:02d}-{d:02d}-{mo:02d}-{y})')
                                 s3.delete_object(Bucket=bucket_name, Key=key)
             except Exception as e:
                 print('Falha ao aplicar retenção:', e)
