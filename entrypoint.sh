@@ -47,7 +47,10 @@ run_backup() {
 if [ "${CRON_ENABLED}" = "true" ] || [ "${CRON_ENABLED}" = "1" ]; then
   echo "Agendando cron: ${CRON_SCHEDULE}"
   echo "${CRON_SCHEDULE} root /app/entrypoint.sh run" > /etc/crontabs/root
-  crond -f -l 8 &
+  # nível de log do crond: 0 (menos verboso) ... 8 (muito verboso)
+  CRON_LOG_LEVEL=${CRON_LOG_LEVEL:-0}
+  echo "Iniciando crond com loglevel=${CRON_LOG_LEVEL}"
+  crond -f -l ${CRON_LOG_LEVEL} &
   # roda uma vez na inicialização também
   run_backup
   wait
