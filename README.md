@@ -16,10 +16,30 @@ Variáveis de ambiente principais:
   - `db_buckets` permite mapear bancos específicos para buckets: `db1=bucket1,db2=bucket2`.
 - `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_REGION`: fallback global.
 - `S3_FORCE_PATH_STYLE` (true/false): global fallback para path-style addressing.
-- `GLOBAL_PREFIX`: prefixo opcional para chaves no bucket.
- - `RETENTION_DAYS`: retenção global em dias (ex.: 7). Pode ser sobrescrito por metadado `retention` por-connection.
- - `CRON_ENABLED` (true/false), `CRON_SCHEDULE` (cron string) e `TIMEZONE` (padrão: `America/Sao_Paulo`) controlam execução agendada.
- - `IGNORE_DATABASES`: lista separada por vírgula de nomes de bancos a serem ignorados (ex.: `postgres,template0`).
+`GLOBAL_PREFIX`: prefixo opcional para chaves no bucket.
+
+`RETENTION_DAYS`: retenção global em dias (ex.: 7). Pode ser sobrescrito por metadado `retention` por-connection.
+
+`CRON_ENABLED` (true/false), `CRON_SCHEDULE` (cron string) e `TIMEZONE` (padrão: `America/Sao_Paulo`) controlam execução agendada.
+
+`IGNORE_DATABASES`: lista separada por vírgula de nomes de bancos a serem ignorados (ex.: `postgres,template0`).
+
+`CRON_SCHEDULE` aceita aliases: `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly` (ou `@annually`). O `entrypoint.sh` converte esses aliases para uma expressão cron antes de gravar no crontab.
+ - `FORCE_TERMINATE_AFTER_BACKUP`: `true|false` (global) ou metadado por-connection `force_terminate=true|false`. Quando ativo, o script executa `pg_terminate_backend` para o usuário do backup após terminar os uploads.
+
+Estrutura e nomes dos arquivos:
+
+- Os dumps são salvos no S3 em pastas por banco dentro do prefix: `{prefix_or_host}/{db}/{filename}`.
+- Nome do arquivo: se `prefix` estiver configurado -> `(Prefix)-(Nome do Banco)-HH-MM-DD-Mes-Ano.dump`; caso contrário `db-HH-MM-DD-Mes-Ano.dump`.
+
+Exemplo de chave S3 resultante:
+
+`s3://mybucket/myprefix/mydb/myprefix-mydb-15-30-05-09-2025.dump`
+
+Observações sobre `FORCE_TERMINATE_AFTER_BACKUP`:
+
+- Use com cautela — termina sessões do mesmo usuário (exceto a atual) e pode interromper aplicações que usem esse usuário.
+- Recomendo usar um usuário dedicado só para backups ou validar com `dry-run` antes de habilitar.
 
 Exemplos rápidos:
 

@@ -16,6 +16,30 @@ fi
 CRON_ENABLED=${CRON_ENABLED:-true}
 CRON_SCHEDULE=${CRON_SCHEDULE:-"0 3 * * *"} # padrão: 03:00 diário
 
+# normaliza aliases do tipo @daily, @hourly, @weekly, @monthly, @yearly
+if [[ "${CRON_SCHEDULE}" == @* ]]; then
+  case "${CRON_SCHEDULE}" in
+    @hourly)
+      CRON_SCHEDULE="0 * * * *"
+      ;;
+    @daily)
+      CRON_SCHEDULE="0 0 * * *"
+      ;;
+    @weekly)
+      CRON_SCHEDULE="0 0 * * 0"
+      ;;
+    @monthly)
+      CRON_SCHEDULE="0 0 1 * *"
+      ;;
+    @yearly|@annually)
+      CRON_SCHEDULE="0 0 1 1 *"
+      ;;
+    *)
+      echo "Alias cron não reconhecido: ${CRON_SCHEDULE}, usando como está"
+      ;;
+  esac
+fi
+
 run_backup() {
   python /app/backup.py
 }

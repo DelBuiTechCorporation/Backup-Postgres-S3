@@ -189,10 +189,19 @@ if __name__ == '__main__':
         # retenção: global RETENTION_DAYS ou meta 'retention'
         retention_global = os.environ.get('RETENTION_DAYS')
         retention = int(meta.get('retention')) if meta.get('retention') else (int(retention_global) if retention_global else None)
+        # definir base_dir (dentro do prefix haverá pastas por db). Se prefix vazio, usa host como base
+        base_dir = prefix.rstrip('/') if prefix else host
         for db in dbs:
-            # adiciona timestamp (UTC, timezone-aware) para permitir ordenação e retenção
-            ts = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-            filename = f"{db}-{ts}.dump"
+            # timestamp format: HH-MM-DD-MM-YYYY (hora-minuto-dia-mes-ano) - timezone-aware UTC
+            now = __import__('datetime').datetime.now(__import__('datetime').timezone.utc)
+            ts = now.strftime('%H-%M-%d-%m-%Y')
+            # nome do arquivo solicitado: (Prefix)-(Nome do Banco)-HH-MM-DD-Mes-Ano
+            if prefix:
+                filename = f"{prefix}-{db}-{ts}.dump"
+            else:
+                filename = f"{db}-{ts}.dump"
+
+            # dump temporário local
             with tempfile.NamedTemporaryFile(prefix=f'{db}-', suffix='.dump', delete=False) as tmpf:
                 tmp_path = tmpf.name
             print(f'Fazendo dump de {db} para {tmp_path}...')
@@ -203,8 +212,8 @@ if __name__ == '__main__':
             if not bucket:
                 raise RuntimeError('Nenhum bucket configurado para upload (db, conn ou global)')
 
-            key_prefix = prefix.rstrip('/') if prefix else ''
-            key = f"{key_prefix}/{host}-{filename}" if key_prefix else f"{host}-{filename}"
+            # chave no S3: {base_dir}/{db}/{filename}
+            key = f"{base_dir}/{db}/{filename}"
             print(f'Enviando para s3://{bucket}/{key}...')
             upload_file(s3, bucket, key, tmp_path)
             os.remove(tmp_path)
@@ -216,28 +225,70 @@ if __name__ == '__main__':
                 # listar objetos no bucket com prefix host-
                 now = __import__('datetime').datetime.now(__import__('datetime').timezone.utc)
                 cutoff = now - __import__('datetime').timedelta(days=retention)
-                # formata para comparar com timestamp no nome (YYYYmmddT%H%M%SZ)
-                cutoff_str = cutoff.strftime('%Y%m%dT%H%M%SZ')
 
-                # definir uma função para listar e deletar objetos que tenham o padrão host-<db>-YYYYmmddT... .dump
+                # usar o recurso para filtrar por prefix base_dir/db/
                 s3_resource = boto3.resource('s3', aws_access_key_id=conn_s3.get('access'), aws_secret_access_key=conn_s3.get('secret'), region_name=conn_s3.get('region'), endpoint_url=conn_s3.get('endpoint'))
                 bucket_name = conn_bucket
                 if bucket_name:
                     bucket_obj = s3_resource.Bucket(bucket_name)
-                    for obj in bucket_obj.objects.all():
-                        key = obj.key
-                        # extrair timestamp do nome se corresponder ao padrão
-                        # procura por segmento que contenha 'T' e termine com Z antes de .dump
-                        if key.endswith('.dump'):
-                            parts = key.rsplit('-', 1)
-                            if len(parts) == 2:
-                                ts_part = parts[1].replace('.dump', '')
-                                try:
-                                    obj_ts = __import__('datetime').datetime.strptime(ts_part, '%Y%m%dT%H%M%SZ').replace(tzinfo=__import__('datetime').timezone.utc)
-                                except Exception:
+                    # para cada banco, filtrar por prefix = base_dir/db/
+                    for db in dbs:
+                        obj_prefix = f"{base_dir}/{db}/"
+                        for obj in bucket_obj.objects.filter(Prefix=obj_prefix):
+                            key = obj.key
+                            if not key.endswith('.dump'):
+                                continue
+                            # extrair timestamp do nome: filename tem estrutura prefix-db-HH-MM-DD-MM-YYYY.dump
+                            # split dos últimos 5 campos (HH,MM,DD,MM,YYYY)
+                            try:
+                                parts = key.rsplit('-', 5)
+                                if len(parts) < 5:
                                     continue
-                                if obj_ts < cutoff:
-                                    print(f'Apagando objeto antigo s3://{bucket_name}/{key} (ts={ts_part})')
-                                    s3.delete_object(Bucket=bucket_name, Key=key)
+                                ts_part = '-'.join(parts[-5:]).replace('.dump', '')
+                                obj_ts = __import__('datetime').datetime.strptime(ts_part, '%H-%M-%d-%m-%Y').replace(tzinfo=__import__('datetime').timezone.utc)
+                            except Exception:
+                                continue
+                            if obj_ts < cutoff:
+                                print(f'Apagando objeto antigo s3://{bucket_name}/{key} (ts={ts_part})')
+                                s3.delete_object(Bucket=bucket_name, Key=key)
             except Exception as e:
                 print('Falha ao aplicar retenção:', e)
+            finally:
+                # fechar cliente resource se foi criado
+                try:
+                    if 's3_resource' in locals() and getattr(s3_resource, 'meta', None):
+                        s3_resource.meta.client.close()
+                except Exception:
+                    pass
+        # cleanup do cliente s3 e variáveis sensíveis
+        try:
+            if hasattr(s3, 'close'):
+                s3.close()
+        except Exception:
+            pass
+        try:
+            # remover PGPASSWORD caso tenha sido exportado globalmente por engano
+            if 'PGPASSWORD' in os.environ:
+                del os.environ['PGPASSWORD']
+        except Exception:
+            pass
+        # opçao de terminar sessões: per-connection meta 'force_terminate' ou global env
+        force_term_global = os.environ.get('FORCE_TERMINATE_AFTER_BACKUP', 'false')
+        force_term = (str(meta.get('force_terminate') or force_term_global).lower() in ('1', 'true', 'yes'))
+        if force_term:
+            try:
+                print(f'Forçando término de sessões do usuário {user} em {host}:{port}...')
+                envp = os.environ.copy()
+                if password:
+                    envp['PGPASSWORD'] = password
+                term_cmd = [
+                    'psql', '-h', host, '-p', str(port), '-U', user, '-c',
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '" + user + "' AND pid <> pg_backend_pid();"
+                ]
+                proc = subprocess.run(term_cmd, env=envp, capture_output=True, text=True)
+                if proc.returncode != 0:
+                    print('Aviso: falha ao terminar sessões:', proc.stderr)
+                else:
+                    print('Sessões terminadas (se houver).')
+            except Exception as e:
+                print('Erro ao forçar término de sessões:', e)
