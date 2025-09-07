@@ -59,6 +59,11 @@ Docker Compose de exemplo (ajuste conforme necessário) está em `docker-compose
 
 Arquivo de exemplo de variáveis: `env.example` (no repositório). Copie para `.env` e ajuste seus valores.
 
+Logs e nível de verbosidade:
+
+- A variável `LOG_LEVEL` controla o que aparece no console do container (`INFO` por padrão). Todo o log detalhado também é gravado em `/var/log/pg-backup.log` (rotacionado).
+- Para menos saída no console, defina `LOG_LEVEL=ERROR` ou `PG_BACKUP_QUIET=true`.
+
 Observações e melhorias possíveis:
 
 - Adicionar compressão (gzip) antes do upload.

@@ -7,6 +7,31 @@ from botocore.config import Config
 from urllib.parse import urlparse
 import sys
 import re
+import logging
+from logging.handlers import RotatingFileHandler
+
+# logging setup
+LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
+try:
+    CONSOLE_LEVEL = getattr(logging, LOG_LEVEL)
+except Exception:
+    CONSOLE_LEVEL = logging.INFO
+
+logger = logging.getLogger('pg_backup')
+logger.setLevel(logging.DEBUG)
+log_path = os.environ.get('BACKUP_LOG_PATH', '/var/log/pg-backup.log')
+try:
+    fh = RotatingFileHandler(log_path, maxBytes=5 * 1024 * 1024, backupCount=3)
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+    logger.addHandler(fh)
+except Exception:
+    # if cannot create file handler, continue without it
+    pass
+ch = logging.StreamHandler()
+ch.setLevel(CONSOLE_LEVEL)
+ch.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+logger.addHandler(ch)
 try:
     from zoneinfo import ZoneInfo
 except Exception:
@@ -42,7 +67,7 @@ def list_databases(user, password, host, port):
     if proc.returncode != 0:
         filtered_err = filter_noise(proc.stderr)
         if filtered_err:
-            print(filtered_err, file=sys.stderr)
+            logger.error(filtered_err)
         raise RuntimeError('Falha ao listar bancos')
     out = filter_noise(proc.stdout)
     dbs = [l.strip() for l in out.splitlines() if l.strip()]
@@ -68,7 +93,7 @@ def dump_database(user, password, host, port, dbname, out_path):
     if proc.returncode != 0:
         filtered_err = filter_noise_local(proc.stderr)
         if filtered_err:
-            print(filtered_err, file=sys.stderr)
+            logger.error(filtered_err)
         raise RuntimeError(f'Falha no pg_dump de {dbname}')
 
 
