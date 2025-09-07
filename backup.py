@@ -180,12 +180,18 @@ if __name__ == '__main__':
         user, password, host, port = parse_postgres_url(conn_url)
         print(f'Conectando em {host}:{port} como {user} para prefix "{prefix}"')
         dbs = list_databases(user, password, host, port)
+        # aplicar IGNORE_DATABASES (global) para pular bancos
+        ignore_spec = os.environ.get('IGNORE_DATABASES', '')
+        ignores = [s.strip() for s in ignore_spec.split(',') if s.strip()]
+        if ignores:
+            print(f'Ignorando bancos: {ignores}')
+            dbs = [d for d in dbs if d not in ignores]
         # retenção: global RETENTION_DAYS ou meta 'retention'
         retention_global = os.environ.get('RETENTION_DAYS')
         retention = int(meta.get('retention')) if meta.get('retention') else (int(retention_global) if retention_global else None)
         for db in dbs:
-            # adiciona timestamp para permitir ordenação e retenção
-            ts = __import__('datetime').datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+            # adiciona timestamp (UTC, timezone-aware) para permitir ordenação e retenção
+            ts = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).strftime('%Y%m%dT%H%M%SZ')
             filename = f"{db}-{ts}.dump"
             with tempfile.NamedTemporaryFile(prefix=f'{db}-', suffix='.dump', delete=False) as tmpf:
                 tmp_path = tmpf.name
@@ -208,7 +214,8 @@ if __name__ == '__main__':
             try:
                 print(f'Aplicando retenção de {retention} dias para bucket(s) desta conexão...')
                 # listar objetos no bucket com prefix host-
-                cutoff = __import__('datetime').datetime.utcnow() - __import__('datetime').timedelta(days=retention)
+                now = __import__('datetime').datetime.now(__import__('datetime').timezone.utc)
+                cutoff = now - __import__('datetime').timedelta(days=retention)
                 # formata para comparar com timestamp no nome (YYYYmmddT%H%M%SZ)
                 cutoff_str = cutoff.strftime('%Y%m%dT%H%M%SZ')
 
@@ -226,7 +233,7 @@ if __name__ == '__main__':
                             if len(parts) == 2:
                                 ts_part = parts[1].replace('.dump', '')
                                 try:
-                                    obj_ts = __import__('datetime').datetime.strptime(ts_part, '%Y%m%dT%H%M%SZ')
+                                    obj_ts = __import__('datetime').datetime.strptime(ts_part, '%Y%m%dT%H%M%SZ').replace(tzinfo=__import__('datetime').timezone.utc)
                                 except Exception:
                                     continue
                                 if obj_ts < cutoff:

@@ -17,8 +17,9 @@ Variáveis de ambiente principais:
 - `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_REGION`: fallback global.
 - `S3_FORCE_PATH_STYLE` (true/false): global fallback para path-style addressing.
 - `GLOBAL_PREFIX`: prefixo opcional para chaves no bucket.
-- `RETENTION_DAYS`: retenção global em dias (ex.: 7). Pode ser sobrescrito por metadado `retention` por-connection.
-- `CRON_ENABLED` (true/false), `CRON_SCHEDULE` (cron string) e `TIMEZONE` (padrão: `America/Sao_Paulo`) controlam execução agendada.
+ - `RETENTION_DAYS`: retenção global em dias (ex.: 7). Pode ser sobrescrito por metadado `retention` por-connection.
+ - `CRON_ENABLED` (true/false), `CRON_SCHEDULE` (cron string) e `TIMEZONE` (padrão: `America/Sao_Paulo`) controlam execução agendada.
+ - `IGNORE_DATABASES`: lista separada por vírgula de nomes de bancos a serem ignorados (ex.: `postgres,template0`).
 
 Exemplos rápidos:
 
