@@ -290,65 +290,62 @@ if __name__ == '__main__':
                 now = __import__('datetime').datetime.now(tz)
                 cutoff = now - __import__('datetime').timedelta(days=retention)
 
-                # usar o recurso para filtrar por prefix base_dir/db/
+                # usar o recurso para filtrar por prefix base_dir/db/ e respeitar buckets por-db
                 s3_resource = boto3.resource('s3', aws_access_key_id=conn_s3.get('access'), aws_secret_access_key=conn_s3.get('secret'), region_name=conn_s3.get('region'), endpoint_url=conn_s3.get('endpoint'))
-                bucket_name = conn_bucket
-                if bucket_name:
+                # iterar por banco e escolher bucket específico se houver
+                for db in dbs:
+                    bucket_name = db_buckets.get(db) or conn_bucket
+                    if not bucket_name:
+                        # nada a fazer para este banco se não houver bucket configurado
+                        continue
                     bucket_obj = s3_resource.Bucket(bucket_name)
-                    # para cada banco, filtrar por prefix = base_dir/db/
-                    for db in dbs:
-                        obj_prefix = f"{base_dir}/{db}/"
-                        # coletar objetos com timestamp parseado
-                        objs = []
-                        for obj in bucket_obj.objects.filter(Prefix=obj_prefix):
-                            key = obj.key
-                            if not key.endswith('.dump'):
+                    obj_prefix = f"{base_dir}/{db}/"
+                    # coletar objetos com timestamp parseado
+                    objs = []
+                    for obj in bucket_obj.objects.filter(Prefix=obj_prefix):
+                        key = obj.key
+                        if not key.endswith('.dump'):
+                            continue
+                        try:
+                            parts = key.rsplit('-', 5)
+                            if len(parts) < 5:
                                 continue
-                            try:
-                                parts = key.rsplit('-', 5)
-                                if len(parts) < 5:
-                                    continue
-                                hour_s, minute_s, day_s, month_s, year_s = parts[-5:]
-                                def digits(s):
-                                    return ''.join(ch for ch in s if ch.isdigit())
-                                h = int(digits(hour_s))
-                                m = int(digits(minute_s))
-                                d = int(digits(day_s))
-                                mo = int(digits(month_s))
-                                y = int(digits(year_s))
-                                obj_ts = __import__('datetime').datetime(y, mo, d, h, m, tzinfo=tz)
-                                objs.append((key, obj_ts))
-                            except Exception:
-                                continue
+                            hour_s, minute_s, day_s, month_s, year_s = parts[-5:]
+                            def digits(s):
+                                return ''.join(ch for ch in s if ch.isdigit())
+                            h = int(digits(hour_s))
+                            m = int(digits(minute_s))
+                            d = int(digits(day_s))
+                            mo = int(digits(month_s))
+                            y = int(digits(year_s))
+                            obj_ts = __import__('datetime').datetime(y, mo, d, h, m, tzinfo=tz)
+                            objs.append((key, obj_ts))
+                        except Exception:
+                            continue
 
-                        # primeiro: remover objetos estritamente mais antigos que cutoff
-                        to_keep = []
-                        for key, obj_ts in objs:
-                            if obj_ts < cutoff:
-                                print(f'Apagando objeto antigo s3://{bucket_name}/{key} (ts={obj_ts.isoformat()})')
-                                s3.delete_object(Bucket=bucket_name, Key=key)
-                            else:
-                                to_keep.append((key, obj_ts))
+                    # primeiro: remover objetos estritamente mais antigos que cutoff
+                    to_keep = []
+                    for key, obj_ts in objs:
+                        if obj_ts < cutoff:
+                            print(f'Apagando objeto antigo s3://{bucket_name}/{key} (ts={obj_ts.isoformat()})')
+                            s3.delete_object(Bucket=bucket_name, Key=key)
+                        else:
+                            to_keep.append((key, obj_ts))
 
-                        # agora: dentro do período retenção, garantir apenas 1 por dia (manter o mais recente por dia)
-                        by_day = {}
-                        for key, obj_ts in to_keep:
-                            day_key = (obj_ts.year, obj_ts.month, obj_ts.day)
-                            prev = by_day.get(day_key)
-                            if not prev or obj_ts > prev[1]:
-                                # se havia anterior, marcar anterior para exclusão
-                                if prev:
-                                    # mover prev para deletar temporariamente
-                                    by_day[day_key] = (key, obj_ts)
-                                else:
-                                    by_day[day_key] = (key, obj_ts)
+                    # agora: dentro do período retenção, garantir apenas 1 por dia (manter o mais recente por dia)
+                    by_day = {}
+                    for key, obj_ts in to_keep:
+                        day_key = (obj_ts.year, obj_ts.month, obj_ts.day)
+                        prev = by_day.get(day_key)
+                        if not prev or obj_ts > prev[1]:
+                            by_day[day_key] = (key, obj_ts)
 
-                        # delete any duplicates (objects in to_keep not equal to the chosen one per day)
-                        chosen = set(k for k, _ in by_day.values())
-                        for key, obj_ts in to_keep:
-                            if key not in chosen:
-                                print(f'Apagando objeto duplicado do dia s3://{bucket_name}/{key} (ts={obj_ts.isoformat()})')
-                                s3.delete_object(Bucket=bucket_name, Key=key)
+                    # delete any duplicates (objects in to_keep not equal to the chosen one per day)
+                    chosen = set(k for k, _ in by_day.values())
+                    for key, obj_ts in to_keep:
+                        if key not in chosen:
+                            print(f'Apagando objeto duplicado do dia s3://{bucket_name}/{key} (ts={obj_ts.isoformat()})')
+                            s3.delete_object(Bucket=bucket_name, Key=key)
             except Exception as e:
                 print('Falha ao aplicar retenção:', e)
             finally:
