@@ -1,71 +1,113 @@
-# Postgres backup para S3 (Minio compatível)
+# pg-bkp — Backup de bancos Postgres para S3 (Minio compatível)
 
-Esta imagem/serviço lista os bancos de uma(s) instância(s) Postgres e gera um `pg_dump -F c` por banco, enviando para um S3 compatível (ex.: Minio).
+Projeto simples para automatizar dumps de bancos Postgres e enviá-los para um storage S3-compatível (ex.: Minio). O foco é ser leve e funcionar tanto em containers quanto em ambientes tradicionais.
 
-Como funciona (resumo):
+## Visão geral
 
-- Recebe `PG_URLS` com uma ou mais conexões; cada conexão pode ter metadados (prefix, bucket, endpoint, access, secret, region, force_path_style).
-- Para cada conexão, lista bancos (exceto templates) e gera um dump por banco.
-- Bucket escolhido: mapeamento por-banco > bucket por-connection > bucket global. Chave gerada: `[{GLOBAL_PREFIX}/]{host}-{db}.dump`.
+- O serviço lê uma ou mais conexões Postgres de `PG_URLS`, lista bancos não-template e gera um `pg_dump -F c` por banco.
+- Cada dump é enviado para um bucket S3 (pode ser global, por-connection ou por-banco).
+- Possui retenção configurável por dias calendariais (ex.: `RETENTION_DAYS=1` mantém apenas os dumps com a data do dia atual).
 
-Variáveis de ambiente principais:
+## Principais arquivos
 
-- `PG_URLS`: itens separados por vírgula. Cada item pode incluir metadados antes da URL do Postgres.
-  - Sintaxe: `[meta@]postgres://user:pass@host:port/db` ou formato posicional compacto:
-    `prefix@bucket@endpoint@forcepatch@access@secret@postgres://...`
-  - `db_buckets` permite mapear bancos específicos para buckets: `db1=bucket1,db2=bucket2`.
-- `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_REGION`: fallback global.
-- `S3_FORCE_PATH_STYLE` (true/false): global fallback para path-style addressing.
-`GLOBAL_PREFIX`: prefixo opcional para chaves no bucket.
+- `backup.py`: script principal que realiza listagem de DBs, gera dumps e aplica retenção.
+- `entrypoint.sh`: wrapper para execução (cron + inicialização imediata no container).
+- `Dockerfile`: imagem docker para rodar o serviço.
 
-`RETENTION_DAYS`: retenção global em dias (ex.: 7). Pode ser sobrescrito por metadado `retention` por-connection.
+## Variáveis de ambiente
 
-`CRON_ENABLED` (true/false), `CRON_SCHEDULE` (cron string) e `TIMEZONE` (padrão: `America/Sao_Paulo`) controlam execução agendada.
+As variáveis abaixo controlam comportamento do serviço. Você pode definir globalmente (para todas as conexões) ou por-connection usando metadados em `PG_URLS`.
 
-`IGNORE_DATABASES`: lista separada por vírgula de nomes de bancos a serem ignorados (ex.: `postgres,template0`).
+- `PG_URLS` (obrigatório): lista separada por vírgula de conexões Postgres. Cada item pode ter metadados antes da URL.
+  - Formatos suportados:
+    - Meta-annotated: `prefix@bucket@endpoint@...@postgres://user:pass@host:port/db` (valores key=value também permitidos).
+    - Posicional compacto: `prefix@bucket@endpoint@forcepath@access@secret@postgres://...`
+  - Exemplo com metadados:
+    `PG_URLS=myprefix@bucket=backups1@postgres://postgres:postgres@postgres:5432/postgres`
 
-`CRON_SCHEDULE` aceita aliases: `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly` (ou `@annually`). O `entrypoint.sh` converte esses aliases para uma expressão cron antes de gravar no crontab.
- - `FORCE_TERMINATE_AFTER_BACKUP`: `true|false` (global) ou metadado por-connection `force_terminate=true|false`. Quando ativo, o script executa `pg_terminate_backend` para o usuário do backup após terminar os uploads.
+- `db_buckets` (opcional, por-connection): mapeamento `db1=bucket1,db2=bucket2` para direcionar backups de bancos específicos a buckets distintos.
 
-Estrutura e nomes dos arquivos:
+- `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_REGION`: configurações globais de S3 (fallback se não informadas por connection).
 
-- Os dumps são salvos no S3 em pastas por banco dentro do prefix: `{prefix_or_host}/{db}/{filename}`.
-- Nome do arquivo: se `prefix` estiver configurado -> `(Prefix)-(Nome do Banco)-HH-MM-DD-Mes-Ano.dump`; caso contrário `db-HH-MM-DD-Mes-Ano.dump`.
+- `S3_FORCE_PATH_STYLE` (true/false): força path-style addressing para S3/Minio.
 
-Exemplo de chave S3 resultante:
+- `GLOBAL_PREFIX`: prefixo opcional adicionado à chave de cada objeto no bucket.
 
-`s3://mybucket/myprefix/mydb/myprefix-mydb-15-30-05-09-2025.dump`
+- `RETENTION_DAYS` (inteiro): número de dias calendariais a manter. Exemplos:
+  - `1`: mantém somente backups com data igual ao dia atual;
+  - `7`: mantém backups dos últimos 7 dias (hoje e 6 dias anteriores);
+  - `0` ou ausente: sem retenção automática.
 
-Observações sobre `FORCE_TERMINATE_AFTER_BACKUP`:
+- `CRON_ENABLED` (true/false): ativa execução via cron dentro do container. Padrão: `true`.
+- `CRON_SCHEDULE`: expressão cron ou alias (`@daily`, `@hourly`, etc.). Padrão: `0 3 * * *`.
+- `TIMEZONE`: fuso usado para timestamps (padrão `America/Sao_Paulo`).
 
-- Use com cautela — termina sessões do mesmo usuário (exceto a atual) e pode interromper aplicações que usem esse usuário.
-- Recomendo usar um usuário dedicado só para backups ou validar com `dry-run` antes de habilitar.
+- `IGNORE_DATABASES`: lista de bancos a ignorar (ex.: `postgres,template0`).
 
-Exemplos rápidos:
+- `FORCE_TERMINATE_AFTER_BACKUP` (global) ou `force_terminate` (por-connection): `true|false`. Se `true`, o script tenta terminar sessões do usuário usado pelo backup após os uploads.
 
-- Simples (usa bucket global):
-  `PG_URLS=postgres://postgres:postgres@postgres:5432/postgres`
+## Como rodar (exemplo com docker-compose)
 
-- Metadados por conexão:
-  `PG_URLS=myprefix@bucket=backups1@endpoint=http://minio:9000@postgres://postgres:postgres@postgres:5432/postgres`
+1. Crie um arquivo `.env` com as variáveis necessárias (ex.: `PG_URLS`, `S3_*`, `RETENTION_DAYS`).
+2. Ajuste `docker-compose.yml` para montar volumes se quiser logs persistentes.
+3. Suba o serviço:
 
-- Formato posicional com `forcepatch`:
-  `PG_URLS=myprefix@backups1@http://minio:9000@true@minio1key@minio1secret@postgres://postgres:postgres@postgres:5432/postgres`
+```bash
+docker-compose up -d
+```
 
-- Mapeamento por-banco:
-  `PG_URLS=conn1@bucket=backups1@db_buckets=postgres=postgres-backups,other=other-backups@postgres://user:pass@host:5432/db`
+O `entrypoint.sh` agendará o cron conforme `CRON_SCHEDULE` e também rodará uma execução imediata na inicialização.
 
-Docker Compose de exemplo (ajuste conforme necessário) está em `docker-compose.yml`.
+## Formato de nomes e chaves S3
 
-Arquivo de exemplo de variáveis: `env.example` (no repositório). Copie para `.env` e ajuste seus valores.
+- Path no bucket: `{base_dir}/{db}/{filename}` onde `base_dir` é `prefix` (se configurado) ou o host do Postgres.
+- `filename`: formato `(prefix-)?{db}-{HH}h-{MM}m-{DD}d-{MM}mês-{YYYY}y.dump`.
 
-Logs e nível de verbosidade:
+Exemplo de chave resultante:
 
-- A variável `LOG_LEVEL` controla o que aparece no console do container (`INFO` por padrão). Todo o log detalhado também é gravado em `/var/log/pg-backup.log` (rotacionado).
-- Para menos saída no console, defina `LOG_LEVEL=ERROR` ou `PG_BACKUP_QUIET=true`.
+```text
+s3://mybucket/myprefix/mydb/myprefix-mydb-09h-09m-08d-09mês-2025y.dump
+```
 
-Observações e melhorias possíveis:
+## Retenção (detalhes comportamentais)
 
-- Adicionar compressão (gzip) antes do upload.
-- Implementar remoção automática de objetos S3 mais antigos conforme `RETENTION_DAYS` (posso implementar se desejar).
-- Oferecer suporte a Docker secrets ou variáveis de ambiente específicas por-prefixo para evitar colocar chaves em `PG_URLS`.
+- A retenção agora é feita por data calendarial: o script converte a data do timestamp extraído do nome do arquivo e compara com uma `cutoff_date` calculada a partir de `RETENTION_DAYS`.
+- Com `RETENTION_DAYS=1`, permanecem apenas arquivos cuja data é a data atual. Arquivos do dia anterior serão apagados independentemente da diferença em horas.
+- Dentro do período de retenção (ex.: últimos N dias), o script mantém apenas um backup por dia (o mais recente) e apaga duplicatas do mesmo dia.
+
+## Logs e depuração
+
+- Logs são enviados ao console e também gravados em `/var/log/pg-backup.log` (rotacionado).
+- Defina `LOG_LEVEL=DEBUG` para obter mensagens mais verbosas, inclusive durante a rotina de retenção.
+
+## Exemplos de uso
+
+- Backup simples para bucket global:
+
+```bash
+PG_URLS=postgres://user:pass@db:5432/postgres \
+S3_ENDPOINT=http://minio:9000 S3_ACCESS_KEY=minio S3_SECRET_KEY=minio123 S3_BUCKET=backups \
+RETENTION_DAYS=7 docker-compose up -d
+```
+
+- Conexão com mapeamento por-banco:
+
+```bash
+PG_URLS=conn1@db_buckets=prod=prod-backups,other=other-backups@postgres://user:pass@host:5432/postgres
+```
+
+## Considerações de segurança
+
+- Evite colocar credenciais sensíveis diretamente em `PG_URLS` quando possível. Use secrets do Docker ou seu orquestrador para injetar `S3_ACCESS_KEY` e `S3_SECRET_KEY`.
+- Restrinja permissões do usuário de backup no Postgres — prefira um usuário com privilégios mínimos necessários.
+
+## Contribuindo
+
+- Abra uma issue para bugs ou propostas de melhoria.
+- Pull requests são bem-vindos — por favor inclua testes quando possível.
+
+## Licença
+
+- Este projeto é distribuído sob a licença MIT. Veja o arquivo `LICENSE` no repositório.
+
+- Copyright © 2025 Victor Delbui / DelBuiTechCorporation
