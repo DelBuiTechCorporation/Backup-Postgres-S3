@@ -288,7 +288,14 @@ if __name__ == '__main__':
                 print(f'Aplicando retenção de {retention} dias para bucket(s) desta conexão...')
                 # listar objetos no bucket com prefix host- usando mesma timezone
                 now = __import__('datetime').datetime.now(tz)
-                cutoff = now - __import__('datetime').timedelta(days=retention)
+                # retenção por dias calendariais: calcula a menor data a ser mantida
+                # Ex.: retention=1 -> manter apenas objetos com data == today
+                #       retention=7 -> manter objetos dos últimos 7 dias (incluindo hoje)
+                from datetime import timedelta as _td
+                if retention and int(retention) > 0:
+                    cutoff_date = now.date() - _td(days=int(retention) - 1)
+                else:
+                    cutoff_date = now.date()
 
                 # usar o recurso para filtrar por prefix base_dir/db/ e respeitar buckets por-db
                 s3_resource = boto3.resource('s3', aws_access_key_id=conn_s3.get('access'), aws_secret_access_key=conn_s3.get('secret'), region_name=conn_s3.get('region'), endpoint_url=conn_s3.get('endpoint'))
@@ -326,7 +333,12 @@ if __name__ == '__main__':
                     # primeiro: remover objetos estritamente mais antigos que cutoff
                     to_keep = []
                     for key, obj_ts in objs:
-                        if obj_ts < cutoff:
+                        try:
+                            obj_date = obj_ts.date()
+                        except Exception:
+                            # se falhar em extrair a data, pular
+                            continue
+                        if obj_date < cutoff_date:
                             print(f'Apagando objeto antigo s3://{bucket_name}/{key} (ts={obj_ts.isoformat()})')
                             s3.delete_object(Bucket=bucket_name, Key=key)
                         else:
