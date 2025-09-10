@@ -53,6 +53,8 @@ if [ "${CRON_ENABLED}" = "true" ] || [ "${CRON_ENABLED}" = "1" ]; then
   crond -f -l ${CRON_LOG_LEVEL} &
   # roda uma vez na inicialização também
   run_backup
+    # Mantém o container ativo para o cron funcionar
+    tail -f /dev/null
   wait
 else
   if [ "${1-}" = "run" ]; then
