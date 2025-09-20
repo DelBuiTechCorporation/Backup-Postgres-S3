@@ -10,7 +10,7 @@ import re
 import logging
 from logging.handlers import RotatingFileHandler
 import zipfile
-import pyminizip
+import pyzipper
 
 # logging setup
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
@@ -101,9 +101,11 @@ def dump_database(user, password, host, port, dbname, out_path):
 
 def zip_database(sql_path, zip_path, password=None):
     if password:
-        # Usar pyminizip para compatibilidade com descompactadores padrão
-        pyminizip.compress(sql_path, None, zip_path, password, 9)
-        logger.info(f'Senha aplicada ao ZIP com pyminizip: {zip_path}')
+        # Usar pyzipper para compatibilidade com descompactadores padrão
+        with pyzipper.AESZipFile(zip_path, 'w', compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as zipf:
+            zipf.setpassword(password.encode('utf-8'))
+            zipf.write(sql_path, os.path.basename(sql_path))
+        logger.info(f'Senha aplicada ao ZIP com pyzipper: {zip_path}')
     else:
         # Usar zipfile padrão para ZIPs sem senha
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:

@@ -44,7 +44,7 @@ As variáveis abaixo controlam comportamento do serviço. Você pode definir glo
 
 - `IGNORE_DATABASES`: lista de bancos a ignorar (ex.: `postgres,template0`).
 
-- `ZIP_PASSWORD` (opcional): senha para proteger o arquivo ZIP usando pyminizip (compatível com descompactadores padrão). Se não definida, o ZIP não terá senha.
+- `ZIP_PASSWORD` (opcional): senha para proteger o arquivo ZIP usando pyzipper (compatível com descompactadores padrão). Se não definida, o ZIP não terá senha.
 
 ## Como rodar (exemplo com docker-compose)
 
