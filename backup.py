@@ -102,6 +102,9 @@ def zip_database(sql_path, zip_path, password=None):
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
         if password:
             zipf.setpassword(password.encode('utf-8'))
+            logger.info(f'Senha aplicada ao ZIP: {zip_path}')
+        else:
+            logger.info(f'ZIP sem senha: {zip_path}')
         zipf.write(sql_path, os.path.basename(sql_path))
     os.remove(sql_path)
 
@@ -282,6 +285,10 @@ if __name__ == '__main__':
 
             # zipar o arquivo SQL
             zip_password = os.environ.get('ZIP_PASSWORD')
+            if zip_password:
+                logger.info(f'ZIP_PASSWORD definido: {len(zip_password)} caracteres')
+            else:
+                logger.info('ZIP_PASSWORD não definido')
             zip_path = tmp_path.replace('.sql', '.zip')
             print(f'Zipando {tmp_path} para {zip_path}...')
             zip_database(tmp_path, zip_path, zip_password)
