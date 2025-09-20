@@ -61,12 +61,12 @@ O `entrypoint.sh` agendará o cron conforme `CRON_SCHEDULE` e também rodará um
 ## Formato de nomes e chaves S3
 
 - Path no bucket: `{base_dir}/{db}/{filename}` onde `base_dir` é `prefix` (se configurado) ou o host do Postgres.
-- `filename`: formato `(prefix-)?{db}-{HH}h-{MM}m-{DD}d-{MM}mês-{YYYY}y.zip`.
+- `filename`: formato `(prefix-)?{db}-{HH}h-{MM}m-{DD}d-{MM}mes-{YYYY}y.zip`.
 
 Exemplo de chave resultante:
 
 ```text
-s3://mybucket/myprefix/mydb/myprefix-mydb-09h-09m-08d-09mês-2025y.zip
+s3://mybucket/myprefix/mydb/myprefix-mydb-09h-09m-08d-09mes-2025y.zip
 ```
 
 ## Retenção (detalhes comportamentais)

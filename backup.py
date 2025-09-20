@@ -268,11 +268,11 @@ if __name__ == '__main__':
             day = now.day
             month = now.month
             year = now.year
-            # nome do arquivo solicitado: prefix-db-14h-01m-07d-09mês-2025y.zip
+            # nome do arquivo solicitado: prefix-db-14h-01m-07d-09mes-2025y.zip
             if prefix:
-                filename = f"{prefix}-{db}-{hour:02d}h-{minute:02d}m-{day:02d}d-{month:02d}mês-{year}y.zip"
+                filename = f"{prefix}-{db}-{hour:02d}h-{minute:02d}m-{day:02d}d-{month:02d}mes-{year}y.zip"
             else:
-                filename = f"{db}-{hour:02d}h-{minute:02d}m-{day:02d}d-{month:02d}mês-{year}y.zip"
+                filename = f"{db}-{hour:02d}h-{minute:02d}m-{day:02d}d-{month:02d}mes-{year}y.zip"
 
             # dump temporário local
             with tempfile.NamedTemporaryFile(prefix=f'{db}-', suffix='.sql', delete=False) as tmpf:
@@ -329,11 +329,13 @@ if __name__ == '__main__':
                     objs = []
                     for obj in bucket_obj.objects.filter(Prefix=obj_prefix):
                         key = obj.key
-                        if not key.endswith('.zip'):
+                        filename = key.split('/')[-1]
+                        if not filename.endswith('.zip'):
                             continue
                         try:
-                            parts = key.rsplit('-', 5)
-                            if len(parts) < 5:
+                            name = filename[:-4]  # remover .zip
+                            parts = name.split('-')
+                            if len(parts) < 6:
                                 continue
                             hour_s, minute_s, day_s, month_s, year_s = parts[-5:]
                             def digits(s):
