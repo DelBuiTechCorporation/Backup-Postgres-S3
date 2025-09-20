@@ -78,6 +78,7 @@ s3://mybucket/myprefix/mydb/myprefix-mydb-09h-09m-08d-09mes-2025y.zip
 ## Logs e depuração
 
 - Logs são enviados ao console e também gravados em `/var/log/pg-backup.log` (rotacionado).
+- O console sempre mostra logs em nível DEBUG para máxima visibilidade, independente da configuração `LOG_LEVEL`.
 - Defina `LOG_LEVEL=DEBUG` para obter mensagens mais verbosas, inclusive durante a rotina de retenção.
 
 ## Exemplos de uso

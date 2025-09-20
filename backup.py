@@ -31,7 +31,7 @@ except Exception:
     # if cannot create file handler, continue without it
     pass
 ch = logging.StreamHandler()
-ch.setLevel(CONSOLE_LEVEL)
+ch.setLevel(logging.DEBUG)  # Sempre DEBUG para console, independente de LOG_LEVEL
 ch.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
 logger.addHandler(ch)
 try:
@@ -209,9 +209,10 @@ def parse_db_buckets(spec):
 
 
 if __name__ == '__main__':
+    logger.info('Iniciando processo de backup do PostgreSQL')
     pg_urls = os.environ.get('PG_URLS')
     if not pg_urls:
-        print('Defina PG_URLS com uma ou mais conexões Postgres (separadas por ,)')
+        logger.error('Defina PG_URLS com uma ou mais conexões Postgres (separadas por ,)')
         sys.exit(1)
 
     # global S3 fallback
@@ -244,13 +245,13 @@ if __name__ == '__main__':
         s3 = build_s3_client_from_settings(conn_s3)
 
         user, password, host, port = parse_postgres_url(conn_url)
-        print(f'Conectando em {host}:{port} como {user} para prefix "{prefix}"')
+        logger.info(f'Conectando em {host}:{port} como {user} para prefix "{prefix}"')
         dbs = list_databases(user, password, host, port)
         # aplicar IGNORE_DATABASES (global) para pular bancos
         ignore_spec = os.environ.get('IGNORE_DATABASES', '')
         ignores = [s.strip() for s in ignore_spec.split(',') if s.strip()]
         if ignores:
-            print(f'Ignorando bancos: {ignores}')
+            logger.info(f'Ignorando bancos: {ignores}')
             dbs = [d for d in dbs if d not in ignores]
         # retenção: global RETENTION_DAYS ou meta 'retention'
         retention_global = os.environ.get('RETENTION_DAYS')
@@ -293,7 +294,7 @@ if __name__ == '__main__':
             else:
                 logger.info('ZIP_PASSWORD não definido')
             zip_path = tmp_path.replace('.sql', '.zip')
-            print(f'Zipando {tmp_path} para {zip_path}...')
+            logger.info(f'Zipando {tmp_path} para {zip_path}...')
             zip_database(tmp_path, zip_path, zip_password)
 
             # usar o zip_path para upload
@@ -306,14 +307,14 @@ if __name__ == '__main__':
 
             # chave no S3: {base_dir}/{db}/{filename}
             key = f"{base_dir}/{db}/{filename}"
-            print(f'Enviando para s3://{bucket}/{key}...')
+            logger.info(f'Enviando para s3://{bucket}/{key}...')
             upload_file(s3, bucket, key, upload_path)
             os.remove(upload_path)
-            print('Feito')
+            logger.info('Backup concluído com sucesso')
         # aplicar retenção: remover objetos mais antigos que retention dias (se configurado)
         if retention:
             try:
-                print(f'Aplicando retenção de {retention} dias para bucket(s) desta conexão...')
+                logger.info(f'Aplicando retenção de {retention} dias para bucket(s) desta conexão...')
                 # listar objetos no bucket com prefix host- usando mesma timezone
                 now = __import__('datetime').datetime.now(tz)
                 # retenção por dias calendariais: calcula a menor data a ser mantida
@@ -369,7 +370,7 @@ if __name__ == '__main__':
                             # se falhar em extrair a data, pular
                             continue
                         if obj_date < cutoff_date:
-                            print(f'Apagando objeto antigo s3://{bucket_name}/{key} (ts={obj_ts.isoformat()})')
+                            logger.info(f'Apagando objeto antigo s3://{bucket_name}/{key} (ts={obj_ts.isoformat()})')
                             s3.delete_object(Bucket=bucket_name, Key=key)
                         else:
                             to_keep.append((key, obj_ts))
@@ -386,10 +387,10 @@ if __name__ == '__main__':
                     chosen = set(k for k, _ in by_day.values())
                     for key, obj_ts in to_keep:
                         if key not in chosen:
-                            print(f'Apagando objeto duplicado do dia s3://{bucket_name}/{key} (ts={obj_ts.isoformat()})')
+                            logger.info(f'Apagando objeto duplicado do dia s3://{bucket_name}/{key} (ts={obj_ts.isoformat()})')
                             s3.delete_object(Bucket=bucket_name, Key=key)
             except Exception as e:
-                print('Falha ao aplicar retenção:', e)
+                logger.error(f'Falha ao aplicar retenção: {e}')
             finally:
                 # fechar cliente resource se foi criado
                 try:
@@ -409,12 +410,13 @@ if __name__ == '__main__':
                 del os.environ['PGPASSWORD']
         except Exception:
             pass
+        logger.info(f'Conexão para {host}:{port} processada com sucesso')
         # opçao de terminar sessões: per-connection meta 'force_terminate' ou global env
         force_term_global = os.environ.get('FORCE_TERMINATE_AFTER_BACKUP', 'false')
         force_term = (str(meta.get('force_terminate') or force_term_global).lower() in ('1', 'true', 'yes'))
         if force_term:
             try:
-                print(f'Forçando término de sessões do usuário {user} em {host}:{port}...')
+                logger.info(f'Forçando término de sessões do usuário {user} em {host}:{port}...')
                 envp = os.environ.copy()
                 if password:
                     envp['PGPASSWORD'] = password
@@ -424,8 +426,8 @@ if __name__ == '__main__':
                 ]
                 proc = subprocess.run(term_cmd, env=envp, capture_output=True, text=True)
                 if proc.returncode != 0:
-                    print('Aviso: falha ao terminar sessões:', proc.stderr)
+                    logger.warning(f'Aviso: falha ao terminar sessões: {proc.stderr}')
                 else:
-                    print('Sessões terminadas (se houver).')
+                    logger.info('Sessões terminadas (se houver).')
             except Exception as e:
-                print('Erro ao forçar término de sessões:', e)
+                logger.error(f'Erro ao forçar término de sessões: {e}')

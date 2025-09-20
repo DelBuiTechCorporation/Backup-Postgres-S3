@@ -1,8 +1,8 @@
 # Dockerfile
 FROM python:3.12-alpine
 
-# instalar cliente postgres, cron e timezone data
-RUN apk add --no-cache postgresql-client bash curl ca-certificates tzdata dcron
+# instalar cliente postgres, cron, gcc para pyminizip e timezone data
+RUN apk add --no-cache postgresql-client bash curl ca-certificates tzdata dcron build-base
 
 WORKDIR /app
 
