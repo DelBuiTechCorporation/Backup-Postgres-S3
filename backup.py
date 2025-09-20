@@ -9,6 +9,7 @@ import sys
 import re
 import logging
 from logging.handlers import RotatingFileHandler
+import zipfile
 
 # logging setup
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
@@ -79,7 +80,7 @@ def dump_database(user, password, host, port, dbname, out_path):
     if password:
         env['PGPASSWORD'] = password
     cmd = [
-        'pg_dump', '-h', host, '-p', str(port), '-U', user, '-F', 'c', '-f', out_path, dbname
+        'pg_dump', '-h', host, '-p', str(port), '-U', user, '-F', 'p', '-f', out_path, dbname
     ]
     proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
     # filtrar noise
@@ -95,6 +96,14 @@ def dump_database(user, password, host, port, dbname, out_path):
         if filtered_err:
             logger.error(filtered_err)
         raise RuntimeError(f'Falha no pg_dump de {dbname}')
+
+
+def zip_database(sql_path, zip_path, password=None):
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        if password:
+            zipf.setpassword(password.encode('utf-8'))
+        zipf.write(sql_path, os.path.basename(sql_path))
+    os.remove(sql_path)
 
 
 def build_s3_client_from_settings(settings):
@@ -141,7 +150,7 @@ def parse_conn_item(item):
     meta = item[:idx]
     url = item[idx:]
     conn_meta = {}
-    parts = [p for p in meta.split('@') if p]
+    parts = [p for p in meta.split('|') if p]
     # Se existir ao menos um par key=value, use parsing por chave
     if any('=' in p for p in parts):
         for part in parts:
@@ -154,7 +163,7 @@ def parse_conn_item(item):
                     conn_meta['prefix'] = part
     else:
         # Suporte ao formato posicional solicitado:
-        # prefix@bucket@endpoint@forcepatch@access@secret@postgres://...
+        # prefix|bucket|endpoint|forcepatch|access|secret|postgres://...
         # forcepatch (opcional) é 'true' ou 'false' e, se presente, vem logo após o endpoint
         if len(parts) >= 1:
             conn_meta['prefix'] = parts[0]
@@ -259,17 +268,26 @@ if __name__ == '__main__':
             day = now.day
             month = now.month
             year = now.year
-            # nome do arquivo solicitado: prefix-db-14h-01m-07d-09mês-2025y.dump
+            # nome do arquivo solicitado: prefix-db-14h-01m-07d-09mês-2025y.zip
             if prefix:
-                filename = f"{prefix}-{db}-{hour:02d}h-{minute:02d}m-{day:02d}d-{month:02d}mês-{year}y.dump"
+                filename = f"{prefix}-{db}-{hour:02d}h-{minute:02d}m-{day:02d}d-{month:02d}mês-{year}y.zip"
             else:
-                filename = f"{db}-{hour:02d}h-{minute:02d}m-{day:02d}d-{month:02d}mês-{year}y.dump"
+                filename = f"{db}-{hour:02d}h-{minute:02d}m-{day:02d}d-{month:02d}mês-{year}y.zip"
 
             # dump temporário local
-            with tempfile.NamedTemporaryFile(prefix=f'{db}-', suffix='.dump', delete=False) as tmpf:
+            with tempfile.NamedTemporaryFile(prefix=f'{db}-', suffix='.sql', delete=False) as tmpf:
                 tmp_path = tmpf.name
             print(f'Fazendo dump de {db} para {tmp_path}...')
             dump_database(user, password, host, port, db, tmp_path)
+
+            # zipar o arquivo SQL
+            zip_password = os.environ.get('ZIP_PASSWORD')
+            zip_path = tmp_path.replace('.sql', '.zip')
+            print(f'Zipando {tmp_path} para {zip_path}...')
+            zip_database(tmp_path, zip_path, zip_password)
+
+            # usar o zip_path para upload
+            upload_path = zip_path
 
             # escolhe bucket: db-specific > conn-specific > global
             bucket = db_buckets.get(db) or conn_bucket
@@ -279,8 +297,8 @@ if __name__ == '__main__':
             # chave no S3: {base_dir}/{db}/{filename}
             key = f"{base_dir}/{db}/{filename}"
             print(f'Enviando para s3://{bucket}/{key}...')
-            upload_file(s3, bucket, key, tmp_path)
-            os.remove(tmp_path)
+            upload_file(s3, bucket, key, upload_path)
+            os.remove(upload_path)
             print('Feito')
         # aplicar retenção: remover objetos mais antigos que retention dias (se configurado)
         if retention:
@@ -311,7 +329,7 @@ if __name__ == '__main__':
                     objs = []
                     for obj in bucket_obj.objects.filter(Prefix=obj_prefix):
                         key = obj.key
-                        if not key.endswith('.dump'):
+                        if not key.endswith('.zip'):
                             continue
                         try:
                             parts = key.rsplit('-', 5)

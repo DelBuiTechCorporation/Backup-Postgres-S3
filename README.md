@@ -4,7 +4,7 @@ Projeto simples para automatizar dumps de bancos Postgres e enviá-los para um s
 
 ## Visão geral
 
-- O serviço lê uma ou mais conexões Postgres de `PG_URLS`, lista bancos não-template e gera um `pg_dump -F c` por banco.
+- O serviço lê uma ou mais conexões Postgres de `PG_URLS`, lista bancos não-template e gera um `pg_dump -F p` por banco (SQL plain), zipa o arquivo e envia para S3.
 - Cada dump é enviado para um bucket S3 (pode ser global, por-connection ou por-banco).
 - Possui retenção configurável por dias calendariais (ex.: `RETENTION_DAYS=1` mantém apenas os dumps com a data do dia atual).
 
@@ -20,10 +20,10 @@ As variáveis abaixo controlam comportamento do serviço. Você pode definir glo
 
 - `PG_URLS` (obrigatório): lista separada por vírgula de conexões Postgres. Cada item pode ter metadados antes da URL.
   - Formatos suportados:
-    - Meta-annotated: `prefix@bucket@endpoint@...@postgres://user:pass@host:port/db` (valores key=value também permitidos).
-    - Posicional compacto: `prefix@bucket@endpoint@forcepath@access@secret@postgres://...`
+    - Meta-annotated: `prefix|bucket|endpoint|...|postgres://user:pass@host:port/db` (valores key=value também permitidos).
+    - Posicional compacto: `prefix|bucket|endpoint|forcepath|access|secret|postgres://...`
   - Exemplo com metadados:
-    `PG_URLS=myprefix@bucket=backups1@postgres://postgres:postgres@postgres:5432/postgres`
+    `PG_URLS=myprefix|bucket=backups1|postgres://postgres:postgres@postgres:5432/postgres`
 
 - `db_buckets` (opcional, por-connection): mapeamento `db1=bucket1,db2=bucket2` para direcionar backups de bancos específicos a buckets distintos.
 
@@ -44,7 +44,7 @@ As variáveis abaixo controlam comportamento do serviço. Você pode definir glo
 
 - `IGNORE_DATABASES`: lista de bancos a ignorar (ex.: `postgres,template0`).
 
-- `FORCE_TERMINATE_AFTER_BACKUP` (global) ou `force_terminate` (por-connection): `true|false`. Se `true`, o script tenta terminar sessões do usuário usado pelo backup após os uploads.
+- `ZIP_PASSWORD` (opcional): senha para proteger o arquivo ZIP. Se não definida, o ZIP não terá senha.
 
 ## Como rodar (exemplo com docker-compose)
 
@@ -61,12 +61,12 @@ O `entrypoint.sh` agendará o cron conforme `CRON_SCHEDULE` e também rodará um
 ## Formato de nomes e chaves S3
 
 - Path no bucket: `{base_dir}/{db}/{filename}` onde `base_dir` é `prefix` (se configurado) ou o host do Postgres.
-- `filename`: formato `(prefix-)?{db}-{HH}h-{MM}m-{DD}d-{MM}mês-{YYYY}y.dump`.
+- `filename`: formato `(prefix-)?{db}-{HH}h-{MM}m-{DD}d-{MM}mês-{YYYY}y.zip`.
 
 Exemplo de chave resultante:
 
 ```text
-s3://mybucket/myprefix/mydb/myprefix-mydb-09h-09m-08d-09mês-2025y.dump
+s3://mybucket/myprefix/mydb/myprefix-mydb-09h-09m-08d-09mês-2025y.zip
 ```
 
 ## Retenção (detalhes comportamentais)
