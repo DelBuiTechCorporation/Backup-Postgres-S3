@@ -13,6 +13,15 @@ Projeto simples para automatizar dumps de bancos Postgres e enviá-los para um s
 - `backup.py`: script principal que realiza listagem de DBs, gera dumps e aplica retenção.
 - `entrypoint.sh`: wrapper para execução (cron + inicialização imediata no container).
 - `Dockerfile`: imagem docker para rodar o serviço.
+- `requirements.txt`: dependências Python (boto3, pyzipper, tqdm).
+
+## Dependências
+
+- **Python 3.12+**
+- **boto3/botocore**: Cliente S3 para uploads
+- **pyzipper**: Compressão ZIP com AES-256
+- **tqdm**: Barras de progresso visuais
+- **postgresql-client**: Ferramentas pg_dump e psql
 
 ## Variáveis de ambiente
 
@@ -57,6 +66,56 @@ docker-compose up -d
 ```
 
 O `entrypoint.sh` agendará o cron conforme `CRON_SCHEDULE` e também rodará uma execução imediata na inicialização.
+
+## Volumes no Docker
+
+Para persistir logs e otimizar performance, configure os seguintes volumes no `docker-compose.yml`:
+
+```yaml
+version: '3.8'
+
+services:
+  pg-backup:
+    build: .
+    container_name: pg-backup
+    env_file:
+      - .env
+    volumes:
+      # Logs persistentes (recomendado)
+      - ./logs:/var/log
+      # Arquivos temporários (opcional, para performance em discos rápidos)
+      - ./temp:/tmp
+      # Timezone do host (opcional)
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+```
+
+**Volumes recomendados:**
+- `./logs:/var/log`: Persiste logs de backup em `./logs/pg-backup.log`
+- `./temp:/tmp`: Usa diretório local para arquivos temporários (SQL e ZIP)
+- Timezone: Sincroniza horário do container com o host
+
+## Barras de Progresso
+
+O script agora inclui barras de progresso visuais para todas as operações principais:
+
+- **📊 Dump PostgreSQL**: Monitora o crescimento do arquivo SQL durante `pg_dump`
+- **📦 Compressão ZIP**: Acompanha a leitura do arquivo SQL durante a compressão
+- **☁️ Upload S3**: Mostra progresso do upload, incluindo multipart uploads para arquivos grandes
+
+As barras são exibidas no console usando `tqdm` e fornecem:
+- Porcentagem completa
+- Velocidade de transferência (B/s, KB/s, MB/s)
+- Tempo estimado restante
+- Tamanho total processado
+
+Exemplo de saída:
+```
+Dump mydb: 100%|██████████| 2.34GB/2.34GB [01:23<00:00, 28.1MB/s]
+Zip mydb-14h-30m-21d-09mes-2025y.sql: 100%|██████████| 2.34GB/2.34GB [00:45<00:00, 51.8MB/s]
+Upload mydb-14h-30m-21d-09mes-2025y.zip: 100%|██████████| 456MB/456MB [00:12<00:00, 37.8MB/s]
+```
 
 ## Formato de nomes e chaves S3
 

@@ -11,6 +11,9 @@ import logging
 from logging.handlers import RotatingFileHandler
 import zipfile
 import pyzipper
+import threading
+import time
+from tqdm import tqdm
 
 # logging setup
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
@@ -83,34 +86,119 @@ def dump_database(user, password, host, port, dbname, out_path):
     cmd = [
         'pg_dump', '-h', host, '-p', str(port), '-U', user, '-F', 'p', '-f', out_path, dbname
     ]
-    proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
-    # filtrar noise
-    def filter_noise_local(text):
-        if not text:
-            return ''
-        noise_re = re.compile(r"TestJobs\(\)|database\.c:\d+")
-        lines = [l for l in text.splitlines() if not noise_re.search(l)]
-        return "\n".join(lines)
 
-    if proc.returncode != 0:
-        filtered_err = filter_noise_local(proc.stderr)
-        if filtered_err:
-            logger.error(filtered_err)
-        raise RuntimeError(f'Falha no pg_dump de {dbname}')
+    # Iniciar monitoramento de progresso em thread separada
+    progress_stop = threading.Event()
+    progress_size = [0]  # Usar lista para modificar dentro da thread
+
+    def monitor_progress():
+        pbar = tqdm(unit='B', unit_scale=True, desc=f'Dump {dbname}', ncols=80)
+        last_size = 0
+        while not progress_stop.is_set():
+            try:
+                if os.path.exists(out_path):
+                    current_size = os.path.getsize(out_path)
+                    if current_size > last_size:
+                        pbar.update(current_size - last_size)
+                        last_size = current_size
+                        progress_size[0] = current_size
+            except OSError:
+                pass
+            time.sleep(0.1)  # Verificar a cada 100ms
+        pbar.close()
+
+    # Iniciar thread de monitoramento
+    monitor_thread = threading.Thread(target=monitor_progress, daemon=True)
+    monitor_thread.start()
+
+    try:
+        proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
+
+        # Aguardar um pouco para o monitoramento capturar o tamanho final
+        time.sleep(0.2)
+        progress_stop.set()
+        monitor_thread.join(timeout=1)
+
+        # filtrar noise
+        def filter_noise_local(text):
+            if not text:
+                return ''
+            noise_re = re.compile(r"TestJobs\(\)|database\.c:\d+")
+            lines = [l for l in text.splitlines() if not noise_re.search(l)]
+            return "\n".join(lines)
+
+        if proc.returncode != 0:
+            filtered_err = filter_noise_local(proc.stderr)
+            if filtered_err:
+                logger.error(filtered_err)
+            raise RuntimeError(f'Falha no pg_dump de {dbname}')
+    except Exception:
+        progress_stop.set()
+        monitor_thread.join(timeout=1)
+        raise
 
 
 def zip_database(sql_path, zip_path, password=None):
-    if password:
-        # Usar pyzipper para compatibilidade com descompactadores padrão
-        with pyzipper.AESZipFile(zip_path, 'w', compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as zipf:
-            zipf.setpassword(password.encode('utf-8'))
-            zipf.write(sql_path, os.path.basename(sql_path))
-        logger.info(f'Senha aplicada ao ZIP com pyzipper: {zip_path}')
-    else:
-        # Usar zipfile padrão para ZIPs sem senha
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            zipf.write(sql_path, os.path.basename(sql_path))
-        logger.info(f'ZIP sem senha: {zip_path}')
+    sql_size = os.path.getsize(sql_path)
+    sql_filename = os.path.basename(sql_path)
+
+    with tqdm(total=sql_size, unit='B', unit_scale=True,
+              desc=f'Zip {sql_filename}', ncols=80) as pbar:
+
+        if password:
+            # Usar pyzipper para compatibilidade com descompactadores padrão
+            with pyzipper.AESZipFile(zip_path, 'w', compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as zipf:
+                zipf.setpassword(password.encode('utf-8'))
+
+                # Wrapper para acompanhar progresso
+                class ProgressFile:
+                    def __init__(self, file_path, callback):
+                        self.file = open(file_path, 'rb')
+                        self.callback = callback
+                        self.total_read = 0
+
+                    def read(self, size=-1):
+                        data = self.file.read(size)
+                        if data:
+                            self.total_read += len(data)
+                            self.callback(len(data))
+                        return data
+
+                    def close(self):
+                        self.file.close()
+
+                progress_file = ProgressFile(sql_path, pbar.update)
+                zipf.writestr(sql_filename, progress_file.read())
+                progress_file.close()
+
+            logger.info(f'Senha aplicada ao ZIP com pyzipper: {zip_path}')
+        else:
+            # Usar zipfile padrão para ZIPs sem senha
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+
+                # Wrapper para acompanhar progresso
+                class ProgressFile:
+                    def __init__(self, file_path, callback):
+                        self.file = open(file_path, 'rb')
+                        self.callback = callback
+                        self.total_read = 0
+
+                    def read(self, size=-1):
+                        data = self.file.read(size)
+                        if data:
+                            self.total_read += len(data)
+                            self.callback(len(data))
+                        return data
+
+                    def close(self):
+                        self.file.close()
+
+                progress_file = ProgressFile(sql_path, pbar.update)
+                zipf.writestr(sql_filename, progress_file.read())
+                progress_file.close()
+
+            logger.info(f'ZIP sem senha: {zip_path}')
+
     os.remove(sql_path)
 
 
@@ -143,8 +231,65 @@ def build_s3_client_from_settings(settings):
     return boto3.client('s3', **kwargs)
 
 
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
+
+
+class ProgressCallback:
+    def __init__(self, filename, total_size):
+        self.filename = filename
+        self.total_size = total_size
+        self.uploaded = 0
+        self.pbar = None
+        self.lock = threading.Lock()
+
+    def __call__(self, bytes_transferred):
+        with self.lock:
+            self.uploaded += bytes_transferred
+            if self.pbar is None:
+                self.pbar = tqdm(
+                    total=self.total_size,
+                    unit='B',
+                    unit_scale=True,
+                    desc=f'Upload {os.path.basename(self.filename)}',
+                    ncols=80
+                )
+            self.pbar.update(bytes_transferred)
+
+    def close(self):
+        if self.pbar:
+            self.pbar.close()
+
+
 def upload_file(s3, bucket, key, path):
-    s3.upload_file(path, bucket, key)
+    file_size = os.path.getsize(path)
+    filename = os.path.basename(path)
+
+    # Para arquivos grandes, usar multipart upload com progresso
+    if file_size > 100 * 1024 * 1024:  # 100MB
+        progress = ProgressCallback(filename, file_size)
+        try:
+            s3.upload_file(
+                path, bucket, key,
+                Callback=progress,
+                Config=boto3.s3.transfer.TransferConfig(
+                    multipart_threshold=100 * 1024 * 1024,  # 100MB
+                    max_concurrency=4,
+                    multipart_chunksize=25 * 1024 * 1024,  # 25MB
+                    use_threads=True
+                )
+            )
+        finally:
+            progress.close()
+    else:
+        # Para arquivos pequenos, upload simples com progresso
+        progress = ProgressCallback(filename, file_size)
+        try:
+            s3.upload_file(path, bucket, key, Callback=progress)
+        finally:
+            progress.close()
 
 
 def parse_conn_item(item):
@@ -231,205 +376,237 @@ if __name__ == '__main__':
     items = [p.strip() for p in pg_urls.split(',') if p.strip()]
     for item in items:
         conn_url, meta = parse_conn_item(item)
-        # build per-conn s3 settings by overriding globals with meta if present
-        conn_s3 = {
-            'endpoint': meta.get('endpoint') or GLOBAL_S3.get('endpoint'),
-            'access': meta.get('access') or GLOBAL_S3.get('access'),
-            'secret': meta.get('secret') or GLOBAL_S3.get('secret'),
-            'region': meta.get('region') or GLOBAL_S3.get('region'),
-            'force_path_style': meta.get('force_path_style') if meta.get('force_path_style') is not None else GLOBAL_S3.get('force_path_style')
-        }
+        try:
+            # build per-conn s3 settings by overriding globals with meta if present
+            conn_s3 = {
+                'endpoint': meta.get('endpoint') or GLOBAL_S3.get('endpoint'),
+                'access': meta.get('access') or GLOBAL_S3.get('access'),
+                'secret': meta.get('secret') or GLOBAL_S3.get('secret'),
+                'region': meta.get('region') or GLOBAL_S3.get('region'),
+                'force_path_style': meta.get('force_path_style') if meta.get('force_path_style') is not None else GLOBAL_S3.get('force_path_style')
+            }
 
-        db_buckets = parse_db_buckets(meta.get('db_buckets', ''))
-        conn_bucket = meta.get('bucket') or GLOBAL_S3.get('bucket')
-        prefix = meta.get('prefix', '') or os.environ.get('GLOBAL_PREFIX', '')
+            db_buckets = parse_db_buckets(meta.get('db_buckets', ''))
+            conn_bucket = meta.get('bucket') or GLOBAL_S3.get('bucket')
+            prefix = meta.get('prefix', '') or os.environ.get('GLOBAL_PREFIX', '')
 
-        s3 = build_s3_client_from_settings(conn_s3)
+            s3 = build_s3_client_from_settings(conn_s3)
 
-        user, password, host, port = parse_postgres_url(conn_url)
-        logger.info(f'Conectando em {host}:{port} como {user} para prefix "{prefix}"')
-        dbs = list_databases(user, password, host, port)
-        # aplicar IGNORE_DATABASES (global) para pular bancos
-        ignore_spec = os.environ.get('IGNORE_DATABASES', '')
-        ignores = [s.strip() for s in ignore_spec.split(',') if s.strip()]
-        if ignores:
-            logger.info(f'Ignorando bancos: {ignores}')
-            dbs = [d for d in dbs if d not in ignores]
-        # retenção: global RETENTION_DAYS ou meta 'retention'
-        retention_global = os.environ.get('RETENTION_DAYS')
-        retention = int(meta.get('retention')) if meta.get('retention') else (int(retention_global) if retention_global else None)
-        # definir base_dir (dentro do prefix haverá pastas por db). Se prefix vazio, usa host como base
-        base_dir = prefix.rstrip('/') if prefix else host
-        # timezone da aplicação
-        tz_name = os.environ.get('TIMEZONE', 'America/Sao_Paulo')
-        if ZoneInfo:
-            try:
-                tz = ZoneInfo(tz_name)
-            except Exception:
-                tz = __import__('datetime').timezone.utc
-        else:
-            tz = __import__('datetime').timezone.utc
-        for db in dbs:
-            # timestamp components (app timezone)
-            now = __import__('datetime').datetime.now(tz)
-            hour = now.hour
-            minute = now.minute
-            day = now.day
-            month = now.month
-            year = now.year
-            # nome do arquivo solicitado: prefix-db-14h-01m-07d-09mes-2025y.zip
-            if prefix:
-                filename = f"{prefix}-{db}-{hour:02d}h-{minute:02d}m-{day:02d}d-{month:02d}mes-{year}y.zip"
-            else:
-                filename = f"{db}-{hour:02d}h-{minute:02d}m-{day:02d}d-{month:02d}mes-{year}y.zip"
-
-            # dump temporário local
-            with tempfile.NamedTemporaryFile(prefix=f'{db}-', suffix='.sql', delete=False) as tmpf:
-                tmp_path = tmpf.name
-            print(f'Fazendo dump de {db} para {tmp_path}...')
-            dump_database(user, password, host, port, db, tmp_path)
-
-            # zipar o arquivo SQL
-            zip_password = os.environ.get('ZIP_PASSWORD')
-            if zip_password:
-                logger.info(f'ZIP_PASSWORD definido: {len(zip_password)} caracteres')
-            else:
-                logger.info('ZIP_PASSWORD não definido')
-            zip_path = tmp_path.replace('.sql', '.zip')
-            logger.info(f'Zipando {tmp_path} para {zip_path}...')
-            zip_database(tmp_path, zip_path, zip_password)
-
-            # usar o zip_path para upload
-            upload_path = zip_path
-
-            # escolhe bucket: db-specific > conn-specific > global
-            bucket = db_buckets.get(db) or conn_bucket
-            if not bucket:
-                raise RuntimeError('Nenhum bucket configurado para upload (db, conn ou global)')
-
-            # chave no S3: {base_dir}/{db}/{filename}
-            key = f"{base_dir}/{db}/{filename}"
-            logger.info(f'Enviando para s3://{bucket}/{key}...')
-            upload_file(s3, bucket, key, upload_path)
-            os.remove(upload_path)
-            logger.info('Backup concluído com sucesso')
-        # aplicar retenção: remover objetos mais antigos que retention dias (se configurado)
-        if retention:
-            try:
-                logger.info(f'Aplicando retenção de {retention} dias para bucket(s) desta conexão...')
-                # listar objetos no bucket com prefix host- usando mesma timezone
-                now = __import__('datetime').datetime.now(tz)
-                # retenção por dias calendariais: calcula a menor data a ser mantida
-                # Ex.: retention=1 -> manter apenas objetos com data == today
-                #       retention=7 -> manter objetos dos últimos 7 dias (incluindo hoje)
-                from datetime import timedelta as _td
-                if retention and int(retention) > 0:
-                    cutoff_date = now.date() - _td(days=int(retention) - 1)
-                else:
-                    cutoff_date = now.date()
-
-                # usar o recurso para filtrar por prefix base_dir/db/ e respeitar buckets por-db
-                s3_resource = boto3.resource('s3', aws_access_key_id=conn_s3.get('access'), aws_secret_access_key=conn_s3.get('secret'), region_name=conn_s3.get('region'), endpoint_url=conn_s3.get('endpoint'))
-                # iterar por banco e escolher bucket específico se houver
-                for db in dbs:
-                    bucket_name = db_buckets.get(db) or conn_bucket
-                    if not bucket_name:
-                        # nada a fazer para este banco se não houver bucket configurado
-                        continue
-                    bucket_obj = s3_resource.Bucket(bucket_name)
-                    obj_prefix = f"{base_dir}/{db}/"
-                    # coletar objetos com timestamp parseado
-                    objs = []
-                    for obj in bucket_obj.objects.filter(Prefix=obj_prefix):
-                        key = obj.key
-                        filename = key.split('/')[-1]
-                        if not filename.endswith('.zip'):
-                            continue
-                        try:
-                            name = filename[:-4]  # remover .zip
-                            parts = name.split('-')
-                            if len(parts) < 6:
-                                continue
-                            hour_s, minute_s, day_s, month_s, year_s = parts[-5:]
-                            def digits(s):
-                                return ''.join(ch for ch in s if ch.isdigit())
-                            h = int(digits(hour_s))
-                            m = int(digits(minute_s))
-                            d = int(digits(day_s))
-                            mo = int(digits(month_s))
-                            y = int(digits(year_s))
-                            obj_ts = __import__('datetime').datetime(y, mo, d, h, m, tzinfo=tz)
-                            objs.append((key, obj_ts))
-                        except Exception:
-                            continue
-
-                    # primeiro: remover objetos estritamente mais antigos que cutoff
-                    to_keep = []
-                    for key, obj_ts in objs:
-                        try:
-                            obj_date = obj_ts.date()
-                        except Exception:
-                            # se falhar em extrair a data, pular
-                            continue
-                        if obj_date < cutoff_date:
-                            logger.info(f'Apagando objeto antigo s3://{bucket_name}/{key} (ts={obj_ts.isoformat()})')
-                            s3.delete_object(Bucket=bucket_name, Key=key)
-                        else:
-                            to_keep.append((key, obj_ts))
-
-                    # agora: dentro do período retenção, garantir apenas 1 por dia (manter o mais recente por dia)
-                    by_day = {}
-                    for key, obj_ts in to_keep:
-                        day_key = (obj_ts.year, obj_ts.month, obj_ts.day)
-                        prev = by_day.get(day_key)
-                        if not prev or obj_ts > prev[1]:
-                            by_day[day_key] = (key, obj_ts)
-
-                    # delete any duplicates (objects in to_keep not equal to the chosen one per day)
-                    chosen = set(k for k, _ in by_day.values())
-                    for key, obj_ts in to_keep:
-                        if key not in chosen:
-                            logger.info(f'Apagando objeto duplicado do dia s3://{bucket_name}/{key} (ts={obj_ts.isoformat()})')
-                            s3.delete_object(Bucket=bucket_name, Key=key)
-            except Exception as e:
-                logger.error(f'Falha ao aplicar retenção: {e}')
-            finally:
-                # fechar cliente resource se foi criado
+            user, password, host, port = parse_postgres_url(conn_url)
+            logger.info(f'Conectando em {host}:{port} como {user} para prefix "{prefix}"')
+            dbs = list_databases(user, password, host, port)
+        except Exception as e:
+            logger.error(f'Erro ao conectar ou listar bancos em {host}:{port}: {e}')
+            continue  # Pular para próxima conexão
+        try:
+            # aplicar IGNORE_DATABASES (global) para pular bancos
+            ignore_spec = os.environ.get('IGNORE_DATABASES', '')
+            ignores = [s.strip() for s in ignore_spec.split(',') if s.strip()]
+            if ignores:
+                logger.info(f'Ignorando bancos: {ignores}')
+                dbs = [d for d in dbs if d not in ignores]
+            # retenção: global RETENTION_DAYS ou meta 'retention'
+            retention_global = os.environ.get('RETENTION_DAYS')
+            retention = int(meta.get('retention')) if meta.get('retention') else (int(retention_global) if retention_global else None)
+            # definir base_dir (dentro do prefix haverá pastas por db). Se prefix vazio, usa host como base
+            base_dir = prefix.rstrip('/') if prefix else host
+            # timezone da aplicação
+            tz_name = os.environ.get('TIMEZONE', 'America/Sao_Paulo')
+            if ZoneInfo:
                 try:
-                    if 's3_resource' in locals() and getattr(s3_resource, 'meta', None):
-                        s3_resource.meta.client.close()
+                    tz = ZoneInfo(tz_name)
                 except Exception:
-                    pass
-        # cleanup do cliente s3 e variáveis sensíveis
-        try:
-            if hasattr(s3, 'close'):
-                s3.close()
-        except Exception:
-            pass
-        try:
-            # remover PGPASSWORD caso tenha sido exportado globalmente por engano
-            if 'PGPASSWORD' in os.environ:
-                del os.environ['PGPASSWORD']
-        except Exception:
-            pass
-        logger.info(f'Conexão para {host}:{port} processada com sucesso')
-        # opçao de terminar sessões: per-connection meta 'force_terminate' ou global env
-        force_term_global = os.environ.get('FORCE_TERMINATE_AFTER_BACKUP', 'false')
-        force_term = (str(meta.get('force_terminate') or force_term_global).lower() in ('1', 'true', 'yes'))
-        if force_term:
+                    tz = __import__('datetime').timezone.utc
+            else:
+                tz = __import__('datetime').timezone.utc
+            for db in dbs:
+                try:
+                    # timestamp components (app timezone)
+                    now = __import__('datetime').datetime.now(tz)
+                    hour = now.hour
+                    minute = now.minute
+                    day = now.day
+                    month = now.month
+                    year = now.year
+                    # nome do arquivo solicitado: prefix-db-14h-01m-07d-09mes-2025y.zip
+                    if prefix:
+                        filename = f"{prefix}-{db}-{hour:02d}h-{minute:02d}m-{day:02d}d-{month:02d}mes-{year}y.zip"
+                    else:
+                        filename = f"{db}-{hour:02d}h-{minute:02d}m-{day:02d}d-{month:02d}mes-{year}y.zip"
+
+                    # dump temporário local
+                    with tempfile.NamedTemporaryFile(prefix=f'{db}-', suffix='.sql', delete=False) as tmpf:
+                        tmp_path = tmpf.name
+                    logger.info(f'Fazendo dump de {db} para {tmp_path}...')
+                    dump_database(user, password, host, port, db, tmp_path)
+
+                    # zipar o arquivo SQL
+                    zip_password = os.environ.get('ZIP_PASSWORD')
+                    if zip_password:
+                        logger.info(f'ZIP_PASSWORD definido: {len(zip_password)} caracteres')
+                    else:
+                        logger.info('ZIP_PASSWORD não definido')
+                    zip_path = tmp_path.replace('.sql', '.zip')
+                    logger.info(f'Zipando {tmp_path} para {zip_path}...')
+                    zip_database(tmp_path, zip_path, zip_password)
+
+                    # usar o zip_path para upload
+                    upload_path = zip_path
+
+                    # escolhe bucket: db-specific > conn-specific > global
+                    bucket = db_buckets.get(db) or conn_bucket
+                    if not bucket:
+                        raise RuntimeError('Nenhum bucket configurado para upload (db, conn ou global)')
+
+                    # Verificar tamanho do ZIP antes do upload
+                    zip_size = os.path.getsize(upload_path)
+                    max_size = 5 * 1024 * 1024 * 1024  # 5GB limite do S3
+                    if zip_size > max_size:
+                        logger.error(f'Arquivo ZIP muito grande: {zip_size} bytes ({zip_size / (1024*1024*1024):.2f} GB). Limite S3: 5GB')
+                        logger.warning(f'Pulado banco {db} devido ao tamanho excessivo')
+                        os.remove(upload_path)
+                        continue  # Pular este banco
+
+                    # chave no S3: {base_dir}/{db}/{filename}
+                    key = f"{base_dir}/{db}/{filename}"
+                    logger.info(f'Enviando para s3://{bucket}/{key}...')
+                    upload_file(s3, bucket, key, upload_path)
+                    os.remove(upload_path)
+                    logger.info('Backup concluído com sucesso')
+                except Exception as e:
+                    logger.error(f'Erro no backup do banco {db}: {e}')
+                    # Limpar arquivos temporários em caso de erro
+                    try:
+                        if 'tmp_path' in locals() and os.path.exists(tmp_path):
+                            os.remove(tmp_path)
+                    except Exception:
+                        pass
+                    try:
+                        if 'upload_path' in locals() and os.path.exists(upload_path):
+                            os.remove(upload_path)
+                    except Exception:
+                        pass
+                    continue  # Pular para próximo banco
+            # aplicar retenção: remover objetos mais antigos que retention dias (se configurado)
+            if retention:
+                try:
+                    logger.info(f'Aplicando retenção de {retention} dias para bucket(s) desta conexão...')
+                    # listar objetos no bucket com prefix host- usando mesma timezone
+                    now = __import__('datetime').datetime.now(tz)
+                    # retenção por dias calendariais: calcula a menor data a ser mantida
+                    # Ex.: retention=1 -> manter apenas objetos com data == today
+                    #       retention=7 -> manter objetos dos últimos 7 dias (incluindo hoje)
+                    from datetime import timedelta as _td
+                    if retention and int(retention) > 0:
+                        cutoff_date = now.date() - _td(days=int(retention) - 1)
+                    else:
+                        cutoff_date = now.date()
+
+                    # usar o recurso para filtrar por prefix base_dir/db/ e respeitar buckets por-db
+                    s3_resource = boto3.resource('s3', aws_access_key_id=conn_s3.get('access'), aws_secret_access_key=conn_s3.get('secret'), region_name=conn_s3.get('region'), endpoint_url=conn_s3.get('endpoint'))
+                    # iterar por banco e escolher bucket específico se houver
+                    for db in dbs:
+                        bucket_name = db_buckets.get(db) or conn_bucket
+                        if not bucket_name:
+                            # nada a fazer para este banco se não houver bucket configurado
+                            continue
+                        bucket_obj = s3_resource.Bucket(bucket_name)
+                        obj_prefix = f"{base_dir}/{db}/"
+                        # coletar objetos com timestamp parseado
+                        objs = []
+                        for obj in bucket_obj.objects.filter(Prefix=obj_prefix):
+                            key = obj.key
+                            filename = key.split('/')[-1]
+                            if not filename.endswith('.zip'):
+                                continue
+                            try:
+                                name = filename[:-4]  # remover .zip
+                                parts = name.split('-')
+                                if len(parts) < 6:
+                                    continue
+                                hour_s, minute_s, day_s, month_s, year_s = parts[-5:]
+                                def digits(s):
+                                    return ''.join(ch for ch in s if ch.isdigit())
+                                h = int(digits(hour_s))
+                                m = int(digits(minute_s))
+                                d = int(digits(day_s))
+                                mo = int(digits(month_s))
+                                y = int(digits(year_s))
+                                obj_ts = __import__('datetime').datetime(y, mo, d, h, m, tzinfo=tz)
+                                objs.append((key, obj_ts))
+                            except Exception:
+                                continue
+
+                        # primeiro: remover objetos estritamente mais antigos que cutoff
+                        to_keep = []
+                        for key, obj_ts in objs:
+                            try:
+                                obj_date = obj_ts.date()
+                            except Exception:
+                                # se falhar em extrair a data, pular
+                                continue
+                            if obj_date < cutoff_date:
+                                logger.info(f'Apagando objeto antigo s3://{bucket_name}/{key} (ts={obj_ts.isoformat()})')
+                                s3.delete_object(Bucket=bucket_name, Key=key)
+                            else:
+                                to_keep.append((key, obj_ts))
+
+                        # agora: dentro do período retenção, garantir apenas 1 por dia (manter o mais recente por dia)
+                        by_day = {}
+                        for key, obj_ts in to_keep:
+                            day_key = (obj_ts.year, obj_ts.month, obj_ts.day)
+                            prev = by_day.get(day_key)
+                            if not prev or obj_ts > prev[1]:
+                                by_day[day_key] = (key, obj_ts)
+
+                        # delete any duplicates (objects in to_keep not equal to the chosen one per day)
+                        chosen = set(k for k, _ in by_day.values())
+                        for key, obj_ts in to_keep:
+                            if key not in chosen:
+                                logger.info(f'Apagando objeto duplicado do dia s3://{bucket_name}/{key} (ts={obj_ts.isoformat()})')
+                                s3.delete_object(Bucket=bucket_name, Key=key)
+                except Exception as e:
+                    logger.error(f'Falha ao aplicar retenção: {e}')
+                finally:
+                    # fechar cliente resource se foi criado
+                    try:
+                        if 's3_resource' in locals() and getattr(s3_resource, 'meta', None):
+                            s3_resource.meta.client.close()
+                    except Exception:
+                        pass
+            # cleanup do cliente s3 e variáveis sensíveis
             try:
-                logger.info(f'Forçando término de sessões do usuário {user} em {host}:{port}...')
-                envp = os.environ.copy()
-                if password:
-                    envp['PGPASSWORD'] = password
-                term_cmd = [
-                    'psql', '-h', host, '-p', str(port), '-U', user, '-c',
-                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '" + user + "' AND pid <> pg_backend_pid();"
-                ]
-                proc = subprocess.run(term_cmd, env=envp, capture_output=True, text=True)
-                if proc.returncode != 0:
-                    logger.warning(f'Aviso: falha ao terminar sessões: {proc.stderr}')
-                else:
-                    logger.info('Sessões terminadas (se houver).')
-            except Exception as e:
-                logger.error(f'Erro ao forçar término de sessões: {e}')
+                if hasattr(s3, 'close'):
+                    s3.close()
+            except Exception:
+                pass
+            try:
+                # remover PGPASSWORD caso tenha sido exportado globalmente por engano
+                if 'PGPASSWORD' in os.environ:
+                    del os.environ['PGPASSWORD']
+            except Exception:
+                pass
+            logger.info(f'Conexão para {host}:{port} processada com sucesso')
+            # opçao de terminar sessões: per-connection meta 'force_terminate' ou global env
+            force_term_global = os.environ.get('FORCE_TERMINATE_AFTER_BACKUP', 'false')
+            force_term = (str(meta.get('force_terminate') or force_term_global).lower() in ('1', 'true', 'yes'))
+            if force_term:
+                try:
+                    logger.info(f'Forçando término de sessões do usuário {user} em {host}:{port}...')
+                    envp = os.environ.copy()
+                    if password:
+                        envp['PGPASSWORD'] = password
+                    term_cmd = [
+                        'psql', '-h', host, '-p', str(port), '-U', user, '-c',
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '" + user + "' AND pid <> pg_backend_pid();"
+                    ]
+                    proc = subprocess.run(term_cmd, env=envp, capture_output=True, text=True)
+                    if proc.returncode != 0:
+                        logger.warning(f'Aviso: falha ao terminar sessões: {proc.stderr}')
+                    else:
+                        logger.info('Sessões terminadas (se houver).')
+                except Exception as e:
+                    logger.error(f'Erro ao forçar término de sessões: {e}')
+        except Exception as e:
+            logger.error(f'Erro na conexão {item[:50]}...: {e}')
+            continue  # Pular para próxima conexão
