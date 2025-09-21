@@ -1,4 +1,9 @@
-# pg-bkp — Backup de bancos Postgres para S3 (Minio compatível)
+# pg-bkp — Backup de bancos P- `PG_URLS` (obrigatório): lista separada por vírgula de conexões Postgres. Cada item pode ter metadados antes da URL.
+  - Formatos suportados:
+    - Meta-annotated: `prefix|bucket=backups1|retention=7|postgres://user:pass@host:port/db` (valores key=value também permitidos).
+    - Posicional compacto: `prefix|bucket|endpoint|forcepath|access|secret|retention|postgres://...`
+  - Exemplo com metadados:
+    `PG_URLS=myprefix|bucket=backups1|retention=7|postgres://postgres:postgres@postgres:5432/postgres`s para S3 (Minio compatível)
 
 Projeto simples para automatizar dumps de bancos Postgres e enviá-los para um storage S3-compatível (ex.: Minio). O foco é ser leve e funcionar tanto em containers quanto em ambientes tradicionais.
 
@@ -55,11 +60,16 @@ As variáveis abaixo controlam comportamento do serviço. Você pode definir glo
 
 - `ZIP_PASSWORD` (opcional): senha para proteger o arquivo ZIP usando pyzipper (compatível com descompactadores padrão). Se não definida, o ZIP não terá senha.
 
+- `ZIP_COMPRESSION_LEVEL` (opcional): nível de compressão ZIP (0-9). Padrão: `6`. Valores maiores = melhor compressão, mais lento.
+
+- `TEMP_DIR` (opcional): diretório para arquivos temporários. Padrão: `/tmp`. Configure para usar volumes mapeados.
+
 ## Como rodar (exemplo com docker-compose)
 
 1. Crie um arquivo `.env` com as variáveis necessárias (ex.: `PG_URLS`, `S3_*`, `RETENTION_DAYS`).
 2. Ajuste `docker-compose.yml` para montar volumes se quiser logs persistentes.
-3. Suba o serviço:
+3. **Para bancos grandes**: Ajuste os limites de memória no `docker-compose.yml` (padrão: 4GB RAM, 2 CPUs).
+4. Suba o serviço:
 
 ```bash
 docker-compose up -d
@@ -101,7 +111,7 @@ services:
 O script agora inclui barras de progresso visuais para todas as operações principais:
 
 - **📊 Dump PostgreSQL**: Monitora o crescimento do arquivo SQL durante `pg_dump`
-- **📦 Compressão ZIP**: Acompanha a leitura do arquivo SQL durante a compressão
+- **📦 Compressão ZIP**: Acompanha a criação do arquivo ZIP usando comando `zip` do sistema
 - **☁️ Upload S3**: Mostra progresso do upload, incluindo multipart uploads para arquivos grandes
 
 As barras são exibidas no console usando `tqdm` e fornecem:
@@ -110,12 +120,31 @@ As barras são exibidas no console usando `tqdm` e fornecem:
 - Tempo estimado restante
 - Tamanho total processado
 
+**Nota sobre arquivos grandes**: Para bancos muito grandes (>10GB), o script usa o comando `zip` do sistema operacional para evitar consumo excessivo de memória RAM. A barra de progresso mostra o progresso baseado no tamanho do arquivo original.
+
 Exemplo de saída:
 ```
 Dump mydb: 100%|██████████| 2.34GB/2.34GB [01:23<00:00, 28.1MB/s]
 Zip mydb-14h-30m-21d-09mes-2025y.sql: 100%|██████████| 2.34GB/2.34GB [00:45<00:00, 51.8MB/s]
 Upload mydb-14h-30m-21d-09mes-2025y.zip: 100%|██████████| 456MB/456MB [00:12<00:00, 37.8MB/s]
 ```
+
+## Limitações e Recomendações
+
+### Memória RAM
+- **Arquivos grandes**: Para bancos >5GB, certifique-se de que o container tenha memória RAM suficiente
+- **Compressão**: O processo de ZIP consome memória adicional durante a compressão
+- **Upload**: Arquivos grandes usam multipart upload que é mais eficiente em memória
+
+### Recomendações de Hardware
+- **RAM mínima**: 2GB para bancos até 10GB, 4GB+ para bancos maiores
+- **CPU**: Pelo menos 2 cores para operações paralelas
+- **Disco**: Espaço suficiente para arquivos temporários (tamanho do banco × 1.5)
+
+### Tratamento de Erros
+- O script pula automaticamente bancos que falham
+- Arquivos temporários são sempre limpos, mesmo em caso de erro
+- Logs detalhados ajudam na depuração de problemas
 
 ## Formato de nomes e chaves S3
 

@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  pg-backup:
+    build: .
+    container_name: pg-backup
+    env_file:
+      - .env
+    volumes:
+      # Volume para logs persistentes
+      - ./logs:/var/log
+      # Volume para arquivos temporários (IMPORTANTE para bancos grandes)
+      - ./temp:/tmp
+      # Volume para timezone do host
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    # Limites de recursos para bancos grandes
+    deploy:
+      resources:
+        limits:
+          memory: 4G      # Ajuste conforme tamanho dos bancos
+          cpus: '2.0'     # Pelo menos 2 CPUs para paralelização
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+    restart: unless-stopped

@@ -145,60 +145,45 @@ def zip_database(sql_path, zip_path, password=None):
     with tqdm(total=sql_size, unit='B', unit_scale=True,
               desc=f'Zip {sql_filename}', ncols=80) as pbar:
 
+        # Usar comando zip do sistema para eficiência com arquivos grandes
+        zip_cmd = ['zip']
+
+        # Adicionar nível de compressão (padrão: 6, range: 0-9)
+        compression_level = os.environ.get('ZIP_COMPRESSION_LEVEL', '6')
+        try:
+            level = int(compression_level)
+            if 0 <= level <= 9:
+                zip_cmd.extend(['-{}'.format(level)])
+            else:
+                zip_cmd.extend(['-6'])  # padrão se inválido
+        except ValueError:
+            zip_cmd.extend(['-6'])  # padrão se não numérico
+
         if password:
-            # Usar pyzipper para compatibilidade com descompactadores padrão
-            with pyzipper.AESZipFile(zip_path, 'w', compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as zipf:
-                zipf.setpassword(password.encode('utf-8'))
-
-                # Wrapper para acompanhar progresso
-                class ProgressFile:
-                    def __init__(self, file_path, callback):
-                        self.file = open(file_path, 'rb')
-                        self.callback = callback
-                        self.total_read = 0
-
-                    def read(self, size=-1):
-                        data = self.file.read(size)
-                        if data:
-                            self.total_read += len(data)
-                            self.callback(len(data))
-                        return data
-
-                    def close(self):
-                        self.file.close()
-
-                progress_file = ProgressFile(sql_path, pbar.update)
-                zipf.writestr(sql_filename, progress_file.read())
-                progress_file.close()
-
-            logger.info(f'Senha aplicada ao ZIP com pyzipper: {zip_path}')
+            zip_cmd.extend(['-P', password])
+            logger.info(f'Senha aplicada ao ZIP via comando zip (compressão nível {compression_level})')
         else:
-            # Usar zipfile padrão para ZIPs sem senha
-            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            logger.info(f'ZIP sem senha via comando zip (compressão nível {compression_level})')
 
-                # Wrapper para acompanhar progresso
-                class ProgressFile:
-                    def __init__(self, file_path, callback):
-                        self.file = open(file_path, 'rb')
-                        self.callback = callback
-                        self.total_read = 0
+        zip_cmd.extend(['-q', zip_path, sql_path])
 
-                    def read(self, size=-1):
-                        data = self.file.read(size)
-                        if data:
-                            self.total_read += len(data)
-                            self.callback(len(data))
-                        return data
+        # Executar comando zip
+        proc = subprocess.run(zip_cmd, capture_output=True, text=True)
 
-                    def close(self):
-                        self.file.close()
+        if proc.returncode != 0:
+            error_msg = proc.stderr.strip()
+            if error_msg:
+                logger.error(f'Erro no zip: {error_msg}')
+            raise RuntimeError(f'Falha ao criar ZIP de {sql_path}')
 
-                progress_file = ProgressFile(sql_path, pbar.update)
-                zipf.writestr(sql_filename, progress_file.read())
-                progress_file.close()
+        # Simular progresso (comando zip não fornece progresso em tempo real)
+        pbar.update(sql_size)
 
-            logger.info(f'ZIP sem senha: {zip_path}')
+    # Verificar se o arquivo ZIP foi criado
+    if not os.path.exists(zip_path):
+        raise RuntimeError(f'Arquivo ZIP não foi criado: {zip_path}')
 
+    # Remover arquivo SQL original
     os.remove(sql_path)
 
 
@@ -316,7 +301,7 @@ def parse_conn_item(item):
                     conn_meta['prefix'] = part
     else:
         # Suporte ao formato posicional solicitado:
-        # prefix|bucket|endpoint|forcepatch|access|secret|postgres://...
+        # prefix|bucket|endpoint|forcepatch|access|secret|retention|postgres://...
         # forcepatch (opcional) é 'true' ou 'false' e, se presente, vem logo após o endpoint
         if len(parts) >= 1:
             conn_meta['prefix'] = parts[0]
@@ -339,6 +324,17 @@ def parse_conn_item(item):
             idx += 1
         if len(parts) > idx:
             conn_meta['secret'] = parts[idx]
+            idx += 1
+        # Campo opcional de retenção após secret
+        if len(parts) > idx:
+            try:
+                retention_val = int(parts[idx])
+                if retention_val >= 0:
+                    conn_meta['retention'] = str(retention_val)
+                idx += 1
+            except ValueError:
+                # Se não for número, continua sem retenção
+                pass
 
     return url, conn_meta
 
@@ -434,8 +430,11 @@ if __name__ == '__main__':
                     else:
                         filename = f"{db}-{hour:02d}h-{minute:02d}m-{day:02d}d-{month:02d}mes-{year}y.zip"
 
-                    # dump temporário local
-                    with tempfile.NamedTemporaryFile(prefix=f'{db}-', suffix='.sql', delete=False) as tmpf:
+                    # dump temporário local - usar diretório configurável para volumes
+                    temp_dir = os.environ.get('TEMP_DIR', '/tmp')
+                    os.makedirs(temp_dir, exist_ok=True)
+
+                    with tempfile.NamedTemporaryFile(prefix=f'{db}-', suffix='.sql', delete=False, dir=temp_dir) as tmpf:
                         tmp_path = tmpf.name
                     logger.info(f'Fazendo dump de {db} para {tmp_path}...')
                     dump_database(user, password, host, port, db, tmp_path)

@@ -6,7 +6,7 @@ WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 
 # instalar cliente postgres, cron, gcc para pyzipper e timezone data
-RUN apk add --no-cache postgresql-client bash curl ca-certificates tzdata dcron build-base && \
+RUN apk add --no-cache postgresql-client bash curl ca-certificates tzdata dcron build-base zip && \
     pip install --no-cache-dir -r requirements.txt && \
     apk del build-base
 
